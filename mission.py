@@ -76,7 +76,7 @@ if not st.session_state.authenticated:
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
         if st.button("🚀 Accéder", type="primary", use_container_width=True):
-            if question.strip().lower() == "moctar tall esp":
+            if question.strip().lower() == "moctar tall":
                 st.session_state.authenticated = True
                 st.session_state.failed_attempts = 0  # Réinitialiser le compteur en cas de succès
                 st.success("✅ Accès autorisé ! Redirection en cours...")
@@ -1406,4 +1406,5 @@ if st.session_state.planning_results:
 
 st.markdown("---")
 st.caption("🚀 Planificateur de Mission v2.3")
+
 st.caption("💻 Developed by @Moctar")
