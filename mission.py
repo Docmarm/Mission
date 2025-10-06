@@ -872,6 +872,7 @@ with tab1:
         st.session_state.sites_df, 
         num_rows="dynamic", 
         use_container_width=True,
+        key="sites_data_editor",
         column_config={
             "Ville": st.column_config.TextColumn("Ville", required=True),
             "Type": st.column_config.SelectboxColumn(
@@ -879,17 +880,68 @@ with tab1:
                 options=["Agence", "Client", "Site", "Partenaire", "Autre"],
                 default="Site"
             ),
-            "Activité": st.column_config.TextColumn("Activité"),
+            "Activité": st.column_config.TextColumn("Activité", default="Visite"),
             "Durée (h)": st.column_config.NumberColumn(
                 "Durée (h)",
                 min_value=0.25,
                 max_value=24,
                 step=0.25,
-                format="%.2f"
+                format="%.2f",
+                default=1.0
             )
         }
     )
     st.session_state.sites_df = sites_df
+    
+    # Option d'ordre des sites
+    st.subheader("🔄 Ordre des sites")
+    order_mode = st.radio(
+        "Mode d'ordonnancement",
+        ["🤖 Automatique (optimisé)", "✋ Manuel (personnalisé)"],
+        horizontal=True,
+        help="Automatique: optimise l'ordre pour minimiser les distances. Manuel: vous choisissez l'ordre."
+    )
+    
+    if order_mode == "✋ Manuel (personnalisé)":
+        st.info("💡 Réorganisez les sites en les faisant glisser dans l'ordre souhaité")
+        
+        # Créer une liste ordonnée des sites pour réorganisation
+        if 'manual_order' not in st.session_state or len(st.session_state.manual_order) != len(sites_df):
+            st.session_state.manual_order = list(range(len(sites_df)))
+        
+        # Interface de réorganisation manuelle
+        st.markdown("**Ordre actuel des sites :**")
+        
+        # Afficher l'ordre actuel avec possibilité de modification
+        for i, idx in enumerate(st.session_state.manual_order):
+            if idx < len(sites_df):
+                site = sites_df.iloc[idx]
+                col1, col2, col3, col4 = st.columns([1, 3, 2, 1])
+                
+                with col1:
+                    st.write(f"**{i+1}.**")
+                with col2:
+                    st.write(f"📍 {site['Ville']}")
+                with col3:
+                    st.write(f"{site['Type']} - {site['Activité']}")
+                with col4:
+                    if i > 0:
+                        if st.button("⬆️", key=f"up_{i}", help="Monter"):
+                            # Échanger avec l'élément précédent
+                            st.session_state.manual_order[i], st.session_state.manual_order[i-1] = \
+                                st.session_state.manual_order[i-1], st.session_state.manual_order[i]
+                            st.rerun()
+                    if i < len(st.session_state.manual_order) - 1:
+                        if st.button("⬇️", key=f"down_{i}", help="Descendre"):
+                            # Échanger avec l'élément suivant
+                            st.session_state.manual_order[i], st.session_state.manual_order[i+1] = \
+                                st.session_state.manual_order[i+1], st.session_state.manual_order[i]
+                            st.rerun()
+        
+        # Bouton pour réinitialiser l'ordre
+        if st.button("🔄 Réinitialiser l'ordre", help="Remettre l'ordre original"):
+            st.session_state.manual_order = list(range(len(sites_df)))
+            st.rerun()
 
 with tab2:
     col1, col2 = st.columns(2)
@@ -1040,7 +1092,31 @@ if plan_button:
         status.text("🔄 Optimisation...")
         progress.progress(0.6)
         
-        order = solve_tsp_fixed_start_end(durations_sec) if len(coords) >= 3 else list(range(len(coords)))
+        # Déterminer l'ordre des sites selon le mode choisi
+        if order_mode == "✋ Manuel (personnalisé)":
+            # Utiliser l'ordre manuel défini par l'utilisateur
+            if use_base_location and base_location and base_location.strip():
+                # Avec base: [base] + sites_manuels + [base]
+                manual_sites_order = [0]  # Base de départ
+                for manual_idx in st.session_state.manual_order:
+                    if manual_idx < len(sites):
+                        manual_sites_order.append(manual_idx + 1)  # +1 car base est à l'index 0
+                manual_sites_order.append(len(all_sites) - 1)  # Base de retour
+                order = manual_sites_order
+            else:
+                # Sans base: sites_manuels + [premier_site]
+                manual_sites_order = []
+                for manual_idx in st.session_state.manual_order:
+                    if manual_idx < len(sites):
+                        manual_sites_order.append(manual_idx)
+                manual_sites_order.append(len(all_sites) - 1)  # Site de retour
+                order = manual_sites_order
+            
+            st.success("✅ Ordre manuel appliqué")
+        else:
+            # Utiliser l'optimisation automatique (TSP)
+            order = solve_tsp_fixed_start_end(durations_sec) if len(coords) >= 3 else list(range(len(coords)))
+            st.success("✅ Ordre optimisé automatiquement")
         
         status.text("🛣️ Calcul itinéraire...")
         progress.progress(0.8)
@@ -1406,5 +1482,4 @@ if st.session_state.planning_results:
 
 st.markdown("---")
 st.caption("🚀 Planificateur de Mission v2.3")
-
 st.caption("💻 Developed by @Moctar")
