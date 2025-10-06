@@ -7,20 +7,28 @@ import requests
 import streamlit as st
 import pandas as pd
 
-from geopy.geocoders import Nominatim
-from geopy.extra.rate_limiter import RateLimiter
-
-import folium
-from streamlit_folium import st_folium
-
 # --------------------------
-# CONFIG APP
+# CONFIG APP (DOIT ÊTRE EN PREMIER)
 # --------------------------
 st.set_page_config(
     page_title="Planificateur de mission terrain", 
     layout="wide",
     page_icon="🗺️"
 )
+
+# Import des modules pour l'export PDF et Word
+try:
+    from pdf_generator import create_pv_pdf, create_word_document
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
+    st.warning("⚠️ Module PDF non disponible. Installez reportlab pour activer l'export PDF.")
+
+from geopy.geocoders import Nominatim
+from geopy.extra.rate_limiter import RateLimiter
+
+import folium
+from streamlit_folium import st_folium
 
 # --------------------------
 # AUTHENTIFICATION
@@ -142,6 +150,992 @@ if 'edit_mode' not in st.session_state:
 
 if 'manual_itinerary' not in st.session_state:
     st.session_state.manual_itinerary = None
+
+# --------------------------
+# FONCTIONS RAPPORT IA
+# --------------------------
+def collect_mission_data_for_ai():
+    """Collecte toutes les données de mission pour l'IA"""
+    if not st.session_state.planning_results:
+        return None
+    
+    results = st.session_state.planning_results
+    itinerary = st.session_state.manual_itinerary or results['itinerary']
+    
+    # Données de base
+    mission_data = {
+        'sites': results['sites_ordered'],
+        'stats': results['stats'],
+        'itinerary': itinerary,
+        'calculation_method': results.get('calculation_method', 'Non spécifié'),
+        'base_location': results.get('base_location', ''),
+        'segments_summary': results.get('segments_summary', [])
+    }
+    
+    # Analyse détaillée des activités
+    activities = {}
+    detailed_activities = []
+    
+    for day, sdt, edt, desc in itinerary:
+        activity_type = "Autre"
+        if "Visite" in desc or "Réunion" in desc:
+            activity_type = "Visite/Réunion"
+        elif "Trajet" in desc or "km" in desc:
+            activity_type = "Déplacement"
+        elif "Pause" in desc or "Repos" in desc:
+            activity_type = "Pause"
+        elif "Nuitée" in desc:
+            activity_type = "Hébergement"
+        
+        duration_hours = (edt - sdt).total_seconds() / 3600
+        
+        if activity_type not in activities:
+            activities[activity_type] = 0
+        activities[activity_type] += duration_hours
+        
+        # Détails de chaque activité
+        detailed_activities.append({
+            'day': day,
+            'start_time': sdt.strftime('%H:%M'),
+            'end_time': edt.strftime('%H:%M'),
+            'duration': duration_hours,
+            'type': activity_type,
+            'description': desc
+        })
+    
+    mission_data['activities_breakdown'] = activities
+    mission_data['detailed_activities'] = detailed_activities
+    
+    # Ajouter les données enrichies si disponibles
+    if hasattr(st.session_state, 'mission_notes'):
+        mission_data['mission_notes'] = st.session_state.mission_notes
+    if hasattr(st.session_state, 'activity_details'):
+        mission_data['activity_details'] = st.session_state.activity_details
+    if hasattr(st.session_state, 'mission_context'):
+        mission_data['mission_context'] = st.session_state.mission_context
+    
+    return mission_data
+
+def collect_construction_report_data():
+    """Interface pour collecter des données spécifiques au procès-verbal de chantier"""
+    st.markdown("### 🏗️ Données pour Procès-Verbal de Chantier")
+    
+    # Informations générales du chantier
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        project_name = st.text_input(
+            "🏗️ Nom du projet/chantier",
+            placeholder="Ex: Travaux d'entretien PA DAL zone SUD",
+            key="project_name"
+        )
+        
+        report_date = st.date_input(
+            "📅 Date de la visite",
+            value=datetime.now().date(),
+            key="report_date"
+        )
+        
+        site_location = st.text_input(
+            "📍 Localisation du site",
+            placeholder="Ex: Vélingara et Kolda",
+            key="site_location"
+        )
+    
+    with col2:
+        report_type = st.selectbox(
+            "📋 Type de rapport",
+            ["Procès-verbal de visite de chantier", "Rapport d'avancement", "Rapport de fin de travaux", "Rapport d'incident"],
+            key="construction_report_type"
+        )
+        
+        weather_conditions = st.text_input(
+            "🌤️ Conditions météorologiques",
+            placeholder="Ex: Ensoleillé, pluvieux, venteux...",
+            key="weather_conditions"
+        )
+    
+    # Liste de présence
+    st.markdown("### 👥 Liste de Présence")
+    
+    if 'attendees' not in st.session_state:
+        st.session_state.attendees = []
+    
+    col_add, col_clear = st.columns([3, 1])
+    with col_add:
+        new_attendee_name = st.text_input("Nom", key="new_attendee_name")
+        new_attendee_structure = st.text_input("Structure/Entreprise", key="new_attendee_structure")
+        new_attendee_function = st.text_input("Fonction", key="new_attendee_function")
+    
+    with col_clear:
+        st.write("")  # Espacement
+        st.write("")  # Espacement
+        if st.button("➕ Ajouter"):
+            if new_attendee_name and new_attendee_structure:
+                st.session_state.attendees.append({
+                    'nom': new_attendee_name,
+                    'structure': new_attendee_structure,
+                    'fonction': new_attendee_function
+                })
+                st.rerun()
+        
+        if st.button("🗑️ Vider"):
+            st.session_state.attendees = []
+            st.rerun()
+    
+    # Affichage de la liste
+    if st.session_state.attendees:
+        st.markdown("**Participants enregistrés :**")
+        for i, attendee in enumerate(st.session_state.attendees):
+            st.write(f"{i+1}. **{attendee['nom']}** - {attendee['structure']} ({attendee['fonction']})")
+    
+    # Intervenants dans le projet
+    st.markdown("### 🏢 Différents Intervenants dans le Projet")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        master_contractor = st.text_input(
+            "🏗️ Maître d'ouvrage",
+            placeholder="Ex: Sonatel",
+            key="master_contractor"
+        )
+        
+        main_contractor = st.text_input(
+            "🔧 Entreprise principale",
+            placeholder="Ex: Koné Construction",
+            key="main_contractor"
+        )
+    
+    with col2:
+        project_manager = st.text_input(
+            "👨‍💼 Maître d'œuvre",
+            placeholder="Ex: Sonatel",
+            key="project_manager"
+        )
+        
+        supervisor = st.text_input(
+            "👷‍♂️ Superviseur/Contrôleur",
+            placeholder="Ex: SECK CONS",
+            key="supervisor"
+        )
+    
+    # Documents contractuels
+    st.markdown("### 📄 Documents Contractuels")
+    
+    if 'contract_documents' not in st.session_state:
+        st.session_state.contract_documents = []
+    
+    col_doc1, col_doc2, col_doc3, col_add_doc = st.columns([2, 2, 2, 1])
+    
+    with col_doc1:
+        doc_name = st.text_input("Document", key="doc_name")
+    with col_doc2:
+        doc_holder = st.text_input("Porteur", key="doc_holder")
+    with col_doc3:
+        doc_comments = st.text_input("Commentaires", key="doc_comments")
+    with col_add_doc:
+        st.write("")  # Espacement
+        if st.button("➕", key="add_doc"):
+            if doc_name and doc_holder:
+                st.session_state.contract_documents.append({
+                    'document': doc_name,
+                    'porteur': doc_holder,
+                    'commentaires': doc_comments
+                })
+                st.rerun()
+    
+    if st.session_state.contract_documents:
+        st.markdown("**Documents enregistrés :**")
+        for i, doc in enumerate(st.session_state.contract_documents):
+            st.write(f"• **{doc['document']}** - Porteur: {doc['porteur']} - {doc['commentaires']}")
+    
+    # Respect du planning
+    st.markdown("### ⏰ Respect du Planning")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        start_notification = st.date_input(
+            "📅 Notification démarrage",
+            key="start_notification"
+        )
+        
+        contractual_delay = st.number_input(
+            "⏱️ Délai contractuel (jours)",
+            min_value=0,
+            value=40,
+            key="contractual_delay"
+        )
+    
+    with col2:
+        remaining_delay = st.number_input(
+            "⏳ Délai restant (jours)",
+            min_value=0,
+            value=0,
+            key="remaining_delay"
+        )
+        
+        progress_percentage = st.slider(
+            "📊 Avancement global (%)",
+            min_value=0,
+            max_value=100,
+            value=50,
+            key="progress_percentage"
+        )
+    
+    with col3:
+        planning_status = st.selectbox(
+            "📈 État du planning",
+            ["En avance", "Dans les temps", "En retard", "Critique"],
+            index=2,
+            key="planning_status"
+        )
+    
+    # Observations détaillées par site
+    st.markdown("### 🔍 Observations Détaillées par Site")
+    
+    if st.session_state.planning_results:
+        sites = st.session_state.planning_results['sites_ordered']
+        
+        for i, site in enumerate(sites):
+            st.markdown(f"#### 📍 Site de {site['Ville']}")
+            
+            # Observations par catégorie
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**🏢 Agence commerciale :**")
+                agency_work = st.text_area(
+                    "Travaux réalisés",
+                    placeholder="Ex: Aucun des travaux prévus n'a été réalisé...",
+                    height=80,
+                    key=f"agency_work_{i}"
+                )
+                
+                st.markdown("**🏗️ Bâtiment technique :**")
+                technical_work = st.text_area(
+                    "État des travaux techniques",
+                    placeholder="Ex: Travaux de carrelage de façade et réhabilitation des toilettes...",
+                    height=80,
+                    key=f"technical_work_{i}"
+                )
+            
+            with col2:
+                st.markdown("**🏠 Logement du gardien :**")
+                guard_housing = st.text_area(
+                    "État du logement",
+                    placeholder="Ex: Mécanisme de la chasse anglaise installé mais non fonctionnel...",
+                    height=80,
+                    key=f"guard_housing_{i}"
+                )
+                
+                st.markdown("**🚪 Façade de l'agence :**")
+                facade_work = st.text_area(
+                    "Travaux de façade",
+                    placeholder="Ex: Corriger les portes qui ne se ferment pas...",
+                    height=80,
+                    key=f"facade_work_{i}"
+                )
+            
+            # Poste de garde
+            st.markdown("**🛡️ Poste de garde :**")
+            guard_post = st.text_area(
+                "État du poste de garde",
+                placeholder="Ex: Peinture du poste de garde non conforme...",
+                height=60,
+                key=f"guard_post_{i}"
+            )
+    
+    # Observations générales et recommandations
+    st.markdown("### 📝 Observations Générales et Recommandations")
+    
+    general_observations = st.text_area(
+        "🔍 Constat général",
+        placeholder="Ex: Lors des visites de chantier, plusieurs constats majeurs ont été relevés concernant la qualité d'exécution...",
+        height=120,
+        key="general_observations"
+    )
+    
+    recommendations = st.text_area(
+        "💡 Recommandations",
+        placeholder="Ex: Il est impératif que KONE CONSTRUCTION mette en place un dispositif correctif immédiat...",
+        height=120,
+        key="recommendations"
+    )
+    
+    # Informations du rapporteur
+    st.markdown("### ✍️ Informations du Rapporteur")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        reporter_name = st.text_input(
+            "👤 Nom du rapporteur",
+            placeholder="Ex: Moctar TALL",
+            key="reporter_name"
+        )
+        
+        report_location = st.text_input(
+            "📍 Lieu de rédaction",
+            placeholder="Ex: Dakar",
+            key="report_location"
+        )
+    
+    with col2:
+        reporter_function = st.text_input(
+            "💼 Fonction",
+            placeholder="Ex: Ingénieur Projet",
+            key="reporter_function"
+        )
+        
+        report_completion_date = st.date_input(
+            "📅 Date de finalisation",
+            value=datetime.now().date(),
+            key="report_completion_date"
+        )
+    
+    return {
+        'project_info': {
+            'project_name': project_name,
+            'report_date': report_date,
+            'site_location': site_location,
+            'report_type': report_type,
+            'weather_conditions': weather_conditions
+        },
+        'attendees': st.session_state.attendees,
+        'stakeholders': {
+            'master_contractor': master_contractor,
+            'main_contractor': main_contractor,
+            'project_manager': project_manager,
+            'supervisor': supervisor
+        },
+        'contract_documents': st.session_state.contract_documents,
+        'planning': {
+            'start_notification': start_notification,
+            'contractual_delay': contractual_delay,
+            'remaining_delay': remaining_delay,
+            'progress_percentage': progress_percentage,
+            'planning_status': planning_status
+        },
+        'observations': {
+            'general_observations': general_observations,
+            'recommendations': recommendations
+        },
+        'reporter': {
+            'reporter_name': reporter_name,
+            'reporter_function': reporter_function,
+            'report_location': report_location,
+            'report_completion_date': report_completion_date
+        }
+    }
+
+def collect_enhanced_mission_data():
+    """Interface pour collecter des données enrichies sur la mission"""
+    st.markdown("### 📝 Informations détaillées sur la mission")
+    
+    # Contexte général de la mission
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        mission_objective = st.text_area(
+            "🎯 Objectif principal de la mission",
+            placeholder="Ex: Audit des agences régionales, formation du personnel, prospection commerciale...",
+            height=100,
+            key="mission_objective"
+        )
+        
+        mission_participants = st.text_input(
+            "👥 Participants à la mission",
+            placeholder="Ex: Jean Dupont (Chef de projet), Marie Martin (Analyste)...",
+            key="mission_participants"
+        )
+    
+    with col2:
+        mission_budget = st.number_input(
+            "💰 Budget alloué (FCFA)",
+            min_value=0,
+            value=0,
+            step=10000,
+            key="mission_budget"
+        )
+        
+        mission_priority = st.selectbox(
+            "⚡ Priorité de la mission",
+            ["Faible", "Normale", "Élevée", "Critique"],
+            index=1,
+            key="mission_priority"
+        )
+    
+    # Notes par site/activité
+    st.markdown("### 📋 Notes détaillées par site")
+    
+    if st.session_state.planning_results:
+        sites = st.session_state.planning_results['sites_ordered']
+        
+        if 'activity_details' not in st.session_state:
+            st.session_state.activity_details = {}
+        
+        for i, site in enumerate(sites):
+            # Utilisation d'un container au lieu d'un expander pour éviter l'imbrication
+            st.markdown(f"### 📍 {site['Ville']} - {site['Type']} ({site['Activité']})")
+            with st.container():
+                col_notes, col_details = st.columns(2)
+                
+                with col_notes:
+                    notes = st.text_area(
+                        "📝 Notes et observations",
+                        placeholder="Décrivez ce qui s'est passé, les résultats obtenus, les difficultés rencontrées...",
+                        height=120,
+                        key=f"notes_{i}"
+                    )
+                    
+                    success_level = st.select_slider(
+                        "✅ Niveau de réussite",
+                        options=["Échec", "Partiel", "Satisfaisant", "Excellent"],
+                        value="Satisfaisant",
+                        key=f"success_{i}"
+                    )
+                
+                with col_details:
+                    contacts_met = st.text_input(
+                        "🤝 Personnes rencontrées",
+                        placeholder="Noms et fonctions des contacts",
+                        key=f"contacts_{i}"
+                    )
+                    
+                    outcomes = st.text_area(
+                        "🎯 Résultats obtenus",
+                        placeholder="Accords signés, informations collectées, problèmes identifiés...",
+                        height=80,
+                        key=f"outcomes_{i}"
+                    )
+                    
+                    follow_up = st.text_input(
+                        "📅 Actions de suivi",
+                        placeholder="Prochaines étapes, rendez-vous programmés...",
+                        key=f"follow_up_{i}"
+                    )
+                
+                # Stocker les détails
+                st.session_state.activity_details[f"site_{i}"] = {
+                    'site_name': site['Ville'],
+                    'site_type': site['Type'],
+                    'activity': site['Activité'],
+                    'notes': notes,
+                    'success_level': success_level,
+                    'contacts_met': contacts_met,
+                    'outcomes': outcomes,
+                    'follow_up': follow_up
+                }
+    
+    # Observations générales
+    st.markdown("### 🔍 Observations générales")
+    
+    col_obs1, col_obs2 = st.columns(2)
+    
+    with col_obs1:
+        challenges = st.text_area(
+            "⚠️ Difficultés rencontrées",
+            placeholder="Problèmes logistiques, retards, obstacles imprévus...",
+            height=100,
+            key="challenges"
+        )
+        
+        lessons_learned = st.text_area(
+            "📚 Leçons apprises",
+            placeholder="Ce qui a bien fonctionné, ce qu'il faut améliorer...",
+            height=100,
+            key="lessons_learned"
+        )
+    
+    with col_obs2:
+        recommendations = st.text_area(
+            "💡 Recommandations",
+            placeholder="Suggestions pour les prochaines missions...",
+            height=100,
+            key="recommendations"
+        )
+        
+        overall_satisfaction = st.select_slider(
+            "😊 Satisfaction globale",
+            options=["Très insatisfait", "Insatisfait", "Neutre", "Satisfait", "Très satisfait"],
+            value="Satisfait",
+            key="overall_satisfaction"
+        )
+    
+    # Stocker le contexte de mission
+    st.session_state.mission_context = {
+        'objective': mission_objective,
+        'participants': mission_participants,
+        'budget': mission_budget,
+        'priority': mission_priority,
+        'challenges': challenges,
+        'lessons_learned': lessons_learned,
+        'recommendations': recommendations,
+        'overall_satisfaction': overall_satisfaction
+    }
+    
+    return True
+
+def ask_interactive_questions():
+    """Pose des questions interactives pour orienter le rapport"""
+    st.markdown("### 🤖 Questions pour personnaliser votre rapport")
+    
+    questions_data = {}
+    
+    # Questions sur le type de rapport souhaité
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        report_focus = st.multiselect(
+            "🎯 Sur quoi souhaitez-vous que le rapport se concentre ?",
+            ["Résultats obtenus", "Efficacité opérationnelle", "Aspects financiers", 
+             "Relations clients", "Problèmes identifiés", "Opportunités découvertes",
+             "Performance de l'équipe", "Logistique et organisation"],
+            default=["Résultats obtenus", "Efficacité opérationnelle"],
+            key="report_focus"
+        )
+        
+        target_audience = st.selectbox(
+            "👥 Qui va lire ce rapport ?",
+            ["Direction générale", "Équipe projet", "Clients", "Partenaires", 
+             "Équipe terrain", "Conseil d'administration"],
+            key="target_audience"
+        )
+    
+    with col2:
+        report_length = st.selectbox(
+            "📄 Longueur souhaitée du rapport",
+            ["Court (1-2 pages)", "Moyen (3-5 pages)", "Détaillé (5+ pages)"],
+            index=1,
+            key="report_length"
+        )
+        
+        include_metrics = st.checkbox(
+            "📊 Inclure des métriques et KPIs",
+            value=True,
+            key="include_metrics"
+        )
+    
+    # Questions spécifiques selon le contexte
+    st.markdown("**Questions spécifiques :**")
+    
+    col3, col4 = st.columns(2)
+    
+    with col3:
+        highlight_successes = st.checkbox(
+            "🏆 Mettre en avant les succès",
+            value=True,
+            key="highlight_successes"
+        )
+        
+        discuss_challenges = st.checkbox(
+            "⚠️ Discuter des défis en détail",
+            value=True,
+            key="discuss_challenges"
+        )
+        
+        future_planning = st.checkbox(
+            "🔮 Inclure la planification future",
+            value=True,
+            key="future_planning"
+        )
+    
+    with col4:
+        cost_analysis = st.checkbox(
+            "💰 Analyser les coûts en détail",
+            value=False,
+            key="cost_analysis"
+        )
+        
+        time_efficiency = st.checkbox(
+            "⏱️ Analyser l'efficacité temporelle",
+            value=True,
+            key="time_efficiency"
+        )
+        
+        stakeholder_feedback = st.checkbox(
+            "💬 Inclure les retours des parties prenantes",
+            value=False,
+            key="stakeholder_feedback"
+        )
+    
+    # Question ouverte pour personnalisation
+    specific_request = st.text_area(
+        "✨ Y a-t-il des aspects spécifiques que vous souhaitez voir dans le rapport ?",
+        placeholder="Ex: Comparaison avec la mission précédente, focus sur un site particulier, analyse d'un problème spécifique...",
+        height=80,
+        key="specific_request"
+    )
+    
+    questions_data = {
+        'report_focus': report_focus,
+        'target_audience': target_audience,
+        'report_length': report_length,
+        'include_metrics': include_metrics,
+        'highlight_successes': highlight_successes,
+        'discuss_challenges': discuss_challenges,
+        'future_planning': future_planning,
+        'cost_analysis': cost_analysis,
+        'time_efficiency': time_efficiency,
+        'stakeholder_feedback': stakeholder_feedback,
+        'specific_request': specific_request
+    }
+    
+    return questions_data
+
+def generate_enhanced_ai_report(mission_data, questions_data, api_key):
+    """Génère un rapport de mission amélioré via l'IA DeepSeek"""
+    try:
+        # Construction du prompt amélioré
+        prompt = build_enhanced_report_prompt(mission_data, questions_data)
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        # Ajuster max_tokens selon la longueur demandée
+        max_tokens_map = {
+            "Court (1-2 pages)": 2000,
+            "Moyen (3-5 pages)": 4000,
+            "Détaillé (5+ pages)": 6000
+        }
+        
+        max_tokens = max_tokens_map.get(questions_data.get('report_length', 'Moyen (3-5 pages)'), 4000)
+        
+        data = {
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": max_tokens
+        }
+        
+        response = requests.post(
+            "https://api.deepseek.com/chat/completions",
+            headers=headers,
+            json=data,
+            timeout=90
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return content
+        else:
+            st.error(f"Erreur API DeepSeek: {response.status_code}")
+            return None
+            
+    except Exception as e:
+        st.error(f"Erreur lors de la génération: {str(e)}")
+        return None
+
+def build_enhanced_report_prompt(mission_data, questions_data):
+    """Construit un prompt amélioré orienté activités pour la génération de rapport"""
+    
+    stats = mission_data['stats']
+    sites = mission_data['sites']
+    activities = mission_data['activities_breakdown']
+    detailed_activities = mission_data.get('detailed_activities', [])
+    mission_context = mission_data.get('mission_context', {})
+    activity_details = mission_data.get('activity_details', {})
+    
+    # Construction des informations détaillées sur les activités
+    activities_info = ""
+    if activity_details:
+        activities_info = "\nDÉTAILS DES ACTIVITÉS PAR SITE:\n"
+        for site_key, details in activity_details.items():
+            if details.get('notes') or details.get('outcomes'):
+                activities_info += f"\n📍 {details['site_name']} ({details['site_type']}):\n"
+                activities_info += f"   - Activité: {details['activity']}\n"
+                if details.get('notes'):
+                    activities_info += f"   - Notes: {details['notes']}\n"
+                if details.get('contacts_met'):
+                    activities_info += f"   - Contacts: {details['contacts_met']}\n"
+                if details.get('outcomes'):
+                    activities_info += f"   - Résultats: {details['outcomes']}\n"
+                if details.get('success_level'):
+                    activities_info += f"   - Niveau de réussite: {details['success_level']}\n"
+                if details.get('follow_up'):
+                    activities_info += f"   - Suivi: {details['follow_up']}\n"
+    
+    # Contexte de mission
+    context_info = ""
+    if mission_context:
+        context_info = f"\nCONTEXTE DE LA MISSION:\n"
+        if mission_context.get('objective'):
+            context_info += f"- Objectif: {mission_context['objective']}\n"
+        if mission_context.get('participants'):
+            context_info += f"- Participants: {mission_context['participants']}\n"
+        if mission_context.get('budget') and mission_context['budget'] > 0:
+            context_info += f"- Budget: {mission_context['budget']:,} FCFA\n"
+        if mission_context.get('priority'):
+            context_info += f"- Priorité: {mission_context['priority']}\n"
+        if mission_context.get('challenges'):
+            context_info += f"- Défis: {mission_context['challenges']}\n"
+        if mission_context.get('lessons_learned'):
+            context_info += f"- Leçons apprises: {mission_context['lessons_learned']}\n"
+        if mission_context.get('overall_satisfaction'):
+            context_info += f"- Satisfaction globale: {mission_context['overall_satisfaction']}\n"
+    
+    # Focus du rapport selon les réponses
+    focus_areas = questions_data.get('report_focus', [])
+    focus_instruction = ""
+    if focus_areas:
+        focus_instruction = f"\nLE RAPPORT DOIT SE CONCENTRER PARTICULIÈREMENT SUR: {', '.join(focus_areas)}"
+    
+    # Instructions spécifiques
+    specific_instructions = []
+    if questions_data.get('highlight_successes'):
+        specific_instructions.append("- Mettre en évidence les succès et réalisations")
+    if questions_data.get('discuss_challenges'):
+        specific_instructions.append("- Analyser en détail les défis rencontrés")
+    if questions_data.get('future_planning'):
+        specific_instructions.append("- Inclure des recommandations pour l'avenir")
+    if questions_data.get('cost_analysis'):
+        specific_instructions.append("- Fournir une analyse détaillée des coûts")
+    if questions_data.get('time_efficiency'):
+        specific_instructions.append("- Analyser l'efficacité temporelle de la mission")
+    if questions_data.get('stakeholder_feedback'):
+        specific_instructions.append("- Intégrer les retours des parties prenantes")
+    if questions_data.get('include_metrics'):
+        specific_instructions.append("- Inclure des métriques et indicateurs de performance")
+    
+    instructions_text = "\n".join(specific_instructions) if specific_instructions else ""
+    
+    prompt = f"""Tu es un expert en rédaction de rapports de mission professionnels. Génère un rapport détaillé et orienté ACTIVITÉS (pas trajets) en français.
+
+DONNÉES DE BASE:
+- Durée totale: {stats['total_days']} jour(s)
+- Distance totale: {stats['total_km']:.1f} km
+- Temps de visite total: {stats['total_visit_hours']:.1f} heures
+- Nombre de sites: {len(sites)}
+- Sites visités: {', '.join([s['Ville'] for s in sites])}
+- Méthode de calcul: {mission_data['calculation_method']}
+
+RÉPARTITION DES ACTIVITÉS:
+{chr(10).join([f"- {act}: {hours:.1f}h" for act, hours in activities.items()])}
+
+{context_info}
+
+{activities_info}
+
+PARAMÈTRES DU RAPPORT:
+- Public cible: {questions_data.get('target_audience', 'Direction générale')}
+- Longueur: {questions_data.get('report_length', 'Moyen (3-5 pages)')}
+{focus_instruction}
+
+INSTRUCTIONS SPÉCIFIQUES:
+{instructions_text}
+
+DEMANDE SPÉCIALE:
+{questions_data.get('specific_request', 'Aucune demande spéciale')}
+
+STRUCTURE REQUISE:
+1. 📋 RÉSUMÉ EXÉCUTIF
+2. 🎯 OBJECTIFS ET CONTEXTE
+3. 📍 DÉROULEMENT DES ACTIVITÉS (focus principal)
+   - Détail par site avec résultats obtenus
+   - Personnes rencontrées et échanges
+   - Succès et difficultés par activité
+4. 📊 ANALYSE DES RÉSULTATS
+   - Objectifs atteints vs prévus
+   - Indicateurs de performance
+   - Retour sur investissement
+5. 🔍 OBSERVATIONS ET ENSEIGNEMENTS
+6. 💡 RECOMMANDATIONS ET ACTIONS DE SUIVI
+7. 📈 CONCLUSION ET PERSPECTIVES
+
+IMPORTANT: 
+- Concentre-toi sur les ACTIVITÉS et leurs RÉSULTATS, pas sur les trajets
+- Utilise les données détaillées fournies pour chaque site
+- Adopte un ton professionnel adapté au public cible
+- Structure clairement avec des titres et sous-titres
+- Inclus des métriques concrètes quand disponibles"""
+
+    return prompt
+
+def build_report_prompt(mission_data, report_type, tone, include_recommendations,
+                       include_risks, include_costs, include_timeline, custom_context):
+    """Construit le prompt optimisé pour la génération de rapport"""
+    
+    stats = mission_data['stats']
+    sites = mission_data['sites']
+    activities = mission_data['activities_breakdown']
+    
+    prompt = f"""Tu es un expert en rédaction de rapports de mission professionnels. 
+
+DONNÉES DE LA MISSION:
+- Durée totale: {stats['total_days']} jour(s)
+- Distance totale: {stats['total_km']:.1f} km
+- Temps de visite total: {stats['total_visit_hours']:.1f} heures
+- Nombre de sites: {len(sites)}
+- Sites visités: {', '.join([s['Ville'] for s in sites])}
+- Méthode de calcul: {mission_data['calculation_method']}
+
+RÉPARTITION DES ACTIVITÉS:
+{chr(10).join([f"- {act}: {hours:.1f}h" for act, hours in activities.items()])}
+
+CONTEXTE SUPPLÉMENTAIRE:
+{custom_context if custom_context else "Aucun contexte spécifique fourni"}
+
+INSTRUCTIONS:
+- Type de rapport: {report_type}
+- Ton: {tone}
+- Inclure recommandations: {'Oui' if include_recommendations else 'Non'}
+- Inclure analyse des risques: {'Oui' if include_risks else 'Non'}
+- Inclure analyse des coûts: {'Oui' if include_costs else 'Non'}
+- Inclure timeline détaillée: {'Oui' if include_timeline else 'Non'}
+
+Génère un rapport complet et structuré en français, avec:
+1. Résumé exécutif
+2. Objectifs et contexte
+3. Déroulement de la mission
+4. Résultats et observations
+5. Analyse des performances (temps, distances, efficacité)
+{"6. Recommandations pour l'avenir" if include_recommendations else ""}
+{"7. Analyse des risques identifiés" if include_risks else ""}
+{"8. Analyse des coûts et budget" if include_costs else ""}
+{"9. Timeline détaillée des activités" if include_timeline else ""}
+10. Conclusion
+
+Utilise un style {tone.lower()} et structure le rapport avec des titres clairs et des sections bien organisées."""
+
+    return prompt
+
+def generate_pv_report(mission_data, questions_data, deepseek_api_key):
+    """Génère un rapport au format procès-verbal professionnel avec l'IA DeepSeek"""
+    
+    if not deepseek_api_key:
+        return None, "Clé API DeepSeek manquante"
+    
+    try:
+        # Construction du prompt spécialisé pour le procès-verbal
+        prompt = f"""Tu es un expert en rédaction de procès-verbaux professionnels pour des projets d'infrastructure. 
+Génère un procès-verbal de visite de chantier détaillé et professionnel au format officiel, basé sur les informations suivantes :
+
+INFORMATIONS DE LA MISSION :
+- Date : {mission_data.get('date', 'Non spécifiée')}
+- Lieu/Site : {mission_data.get('location', 'Non spécifié')}
+- Objectif : {mission_data.get('objective', 'Non spécifié')}
+- Participants : {', '.join(mission_data.get('participants', []))}
+- Durée : {mission_data.get('duration', 'Non spécifiée')}
+
+DÉTAILS SUPPLÉMENTAIRES :
+- Contexte : {questions_data.get('context', 'Non spécifié')}
+- Observations : {questions_data.get('observations', 'Non spécifiées')}
+- Problèmes identifiés : {questions_data.get('issues', 'Aucun')}
+- Actions réalisées : {questions_data.get('actions', 'Non spécifiées')}
+- Recommandations : {questions_data.get('recommendations', 'Aucune')}
+
+STRUCTURE OBLIGATOIRE DU PROCÈS-VERBAL (respecter exactement cette numérotation) :
+
+I. Cadre général
+   1. Cadre général
+      - Contexte du projet et objectifs généraux
+      - Cadre contractuel et réglementaire
+      - Intervenants principaux du projet
+
+   2. Objet de la mission
+      - Motif précis de la visite
+      - Périmètre d'intervention
+      - Objectifs spécifiques de la mission
+
+II. Déroulement de la mission
+   A. SITE DE [NOM DU SITE 1]
+      - Reconnaître l'équipe présente dans le secteur concerné
+      - Vérifier l'avancement des travaux (donner un pourcentage)
+      - Faire un bilan, s'enquérir des éventuelles difficultés et contraintes
+      - Apprécier la qualité des travaux réalisés
+      - Donner des orientations pour la suite des travaux
+
+   B. SITE DE [NOM DU SITE 2] (si applicable)
+      - Mêmes points que pour le site 1
+      - Spécificités du site
+
+III. Bilan et recommandations
+   A. Points positifs constatés
+      - Éléments satisfaisants observés
+      - Bonnes pratiques identifiées
+      - Respect des délais et procédures
+
+   B. Points d'attention et difficultés
+      - Problèmes techniques identifiés
+      - Contraintes rencontrées
+      - Risques potentiels
+
+   C. Recommandations et orientations
+      - Actions correctives immédiates
+      - Mesures préventives
+      - Orientations pour la suite du projet
+
+IV. Observations détaillées
+   - Constats techniques précis
+   - Mesures et données relevées
+   - Documentation photographique (mentionner si applicable)
+   - Respect des normes de sécurité et environnementales
+
+CONSIGNES DE RÉDACTION STRICTES :
+- Style administratif formel et professionnel
+- Terminologie technique précise du BTP/infrastructure
+- Phrases courtes et factuelles
+- Éviter absolument les opinions personnelles
+- Utiliser le passé composé pour les actions réalisées
+- Utiliser le présent pour les constats
+- Numérotation stricte avec chiffres romains et lettres
+- Longueur : 1000-1500 mots minimum
+- Inclure des données chiffrées quand possible (pourcentages, mesures, délais)
+- Mentionner les normes et références techniques applicables
+
+FORMAT DE PRÉSENTATION :
+- Titres en majuscules pour les sections principales
+- Sous-titres avec numérotation claire
+- Paragraphes structurés avec puces pour les listes
+- Conclusion avec date et lieu de rédaction
+
+Le procès-verbal doit être conforme aux standards administratifs et prêt pour validation hiérarchique et archivage officiel."""
+
+        # Appel à l'API DeepSeek
+        headers = {
+            'Authorization': f'Bearer {deepseek_api_key}',
+            'Content-Type': 'application/json'
+        }
+        
+        data = {
+            'model': 'deepseek-chat',
+            'messages': [
+                {
+                    'role': 'user',
+                    'content': prompt
+                }
+            ],
+            'temperature': 0.3,  # Plus faible pour plus de cohérence
+            'max_tokens': 2000
+        }
+        
+        response = requests.post(
+            'https://api.deepseek.com/chat/completions',
+            headers=headers,
+            json=data,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            if 'choices' in result and len(result['choices']) > 0:
+                pv_content = result['choices'][0]['message']['content']
+                return pv_content, None
+            else:
+                return None, "Réponse invalide de l'API DeepSeek"
+        else:
+            return None, f"Erreur API DeepSeek: {response.status_code} - {response.text}"
+            
+    except requests.exceptions.Timeout:
+        return None, "Timeout lors de l'appel à l'API DeepSeek"
+    except requests.exceptions.RequestException as e:
+        return None, f"Erreur de connexion à l'API DeepSeek: {str(e)}"
+    except Exception as e:
+        return None, f"Erreur lors de la génération du PV: {str(e)}"
 
 # --------------------------
 # FONCTIONS UTILITAIRES
@@ -1480,6 +2474,820 @@ if st.session_state.planning_results:
                 use_container_width=True
             )
 
+# --------------------------
+# MODULE RAPPORT IA AMÉLIORÉ
+# --------------------------
+if st.session_state.planning_results:
+    st.markdown("---")
+    st.header("📋 Génération de rapport de mission (IA)")
+    
+    with st.expander("🤖 Générer un rapport complet avec l'IA", expanded=False):
+        st.markdown("**Utilisez l'IA pour générer un rapport professionnel orienté activités**")
+        
+        # Onglets pour organiser l'interface
+        tab_basic, tab_details, tab_questions, tab_construction, tab_generate = st.tabs([
+            "📝 Rapport basique", "📋 Détails mission", "🤖 Questions IA", "🏗️ Procès-verbal", "🚀 Génération"
+        ])
+        
+        with tab_basic:
+            st.markdown("### 📄 Rapport rapide (version simplifiée)")
+            
+            # Options de rapport basique
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                report_type = st.selectbox(
+                    "Type de rapport",
+                    ["Rapport complet", "Résumé exécutif", "Rapport technique", "Rapport financier", "Procès-verbal professionnel"],
+                    help="Choisissez le type de rapport à générer"
+                )
+            
+            with col2:
+                report_tone = st.selectbox(
+                    "Ton du rapport",
+                    ["Professionnel", "Formel", "Décontracté", "Technique"],
+                    help="Définissez le ton du rapport"
+                )
+            
+            # Options avancées (sans expander imbriqué)
+            st.markdown("**Options avancées**")
+            col3, col4 = st.columns(2)
+            
+            with col3:
+                include_recommendations = st.checkbox("Inclure des recommandations", value=True)
+                include_risks = st.checkbox("Inclure l'analyse des risques", value=True)
+            
+            with col4:
+                include_costs = st.checkbox("Inclure l'analyse des coûts", value=True)
+                include_timeline = st.checkbox("Inclure la timeline détaillée", value=True)
+            
+            custom_context = st.text_area(
+                "Contexte supplémentaire (optionnel)",
+                placeholder="Ajoutez des informations spécifiques sur votre mission, objectifs, contraintes...",
+                height=100
+            )
+            
+            # Bouton de génération basique
+            if st.button("🚀 Générer le rapport basique", type="secondary", use_container_width=True):
+                if not deepseek_api_key:
+                    st.error("❌ Clé API DeepSeek manquante")
+                else:
+                    with st.spinner("🤖 Génération du rapport en cours..."):
+                        # Collecte des données de mission
+                        mission_data = collect_mission_data_for_ai()
+                        
+                        # Génération selon le type de rapport sélectionné
+                        if report_type == "Procès-verbal professionnel":
+                            # Génération du procès-verbal avec l'IA
+                            questions_data_pv = {
+                                'context': custom_context,
+                                'observations': 'Observations détaillées de la mission',
+                                'issues': 'Problèmes identifiés lors de la mission',
+                                'actions': 'Actions réalisées pendant la mission',
+                                'recommendations': 'Recommandations pour la suite'
+                            }
+                            
+                            report_content, error = generate_pv_report(
+                                mission_data, 
+                                questions_data_pv,
+                                deepseek_api_key
+                            )
+                            
+                            if error:
+                                st.error(f"❌ Erreur lors de la génération du PV: {error}")
+                            else:
+                                st.success("✅ Procès-verbal généré avec succès!")
+                                
+                                # Affichage du PV
+                                st.markdown("### 📋 Procès-verbal généré")
+                                st.markdown(report_content)
+                                
+                                # Options d'export spécialisées pour le PV
+                                st.markdown("### 💾 Export du procès-verbal")
+                                col_txt, col_html, col_pdf = st.columns(3)
+                                
+                                with col_txt:
+                                    st.download_button(
+                                        label="📄 Télécharger TXT",
+                                        data=report_content,
+                                        file_name=f"pv_mission_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                                        mime="text/plain",
+                                        use_container_width=True
+                                    )
+                                
+                                with col_html:
+                                    # HTML formaté pour le PV
+                                    html_pv = f"""
+                                    <!DOCTYPE html>
+                                    <html>
+                                    <head>
+                                        <meta charset="UTF-8">
+                                        <title>Procès-verbal de Mission</title>
+                                        <style>
+                                            @page {{ margin: 2cm; }}
+                                            body {{ 
+                                                font-family: 'Times New Roman', serif; 
+                                                font-size: 12pt; 
+                                                line-height: 1.4; 
+                                                color: #000; 
+                                                margin: 0;
+                                            }}
+                                            .header {{ 
+                                                text-align: center; 
+                                                margin-bottom: 30px; 
+                                                border-bottom: 2px solid #000;
+                                                padding-bottom: 15px;
+                                            }}
+                                            .header h1 {{ 
+                                                font-size: 18pt; 
+                                                margin: 0; 
+                                                text-transform: uppercase;
+                                                font-weight: bold;
+                                            }}
+                                            h2 {{ 
+                                                font-size: 14pt; 
+                                                margin: 25px 0 10px 0; 
+                                                text-decoration: underline;
+                                                font-weight: bold;
+                                            }}
+                                            h3 {{ 
+                                                font-size: 12pt; 
+                                                margin: 20px 0 8px 0; 
+                                                font-weight: bold;
+                                            }}
+                                            .signature {{ 
+                                                margin-top: 40px; 
+                                                text-align: right;
+                                            }}
+                                            .signature-line {{ 
+                                                border-top: 1px solid #000; 
+                                                width: 200px; 
+                                                margin: 30px 0 5px auto;
+                                            }}
+                                            ul {{ margin-left: 20px; }}
+                                            li {{ margin-bottom: 5px; }}
+                                        </style>
+                                    </head>
+                                    <body>
+                                        <div class="header">
+                                            <h1>Procès-verbal de Mission</h1>
+                                            <p><strong>Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}</strong></p>
+                                        </div>
+                                        {report_content.replace(chr(10), '<br>')}
+                                        <div class="signature">
+                                            <p>Fait à Dakar, le {datetime.now().strftime('%d/%m/%Y')}</p>
+                                            <div class="signature-line"></div>
+                                            <p><strong>Responsable Mission</strong></p>
+                                        </div>
+                                    </body>
+                                    </html>
+                                    """
+                                    
+                                    st.download_button(
+                                        label="🌐 Télécharger HTML",
+                                        data=html_pv,
+                                        file_name=f"pv_mission_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
+                                        mime="text/html",
+                                        use_container_width=True
+                                    )
+                                
+                                with col_pdf:
+                                    st.info("💡 Ouvrez le fichier HTML dans votre navigateur et utilisez 'Imprimer > Enregistrer au format PDF' pour obtenir un PDF professionnel.")
+                        else:
+                            # Génération du rapport basique (utilisation de l'ancienne fonction)
+                            # Pour le rapport basique, on utilise une version simplifiée
+                            questions_data_simple = {
+                                'report_focus': report_type,
+                                'target_audience': 'Équipe',
+                                'report_length': 'Moyen',
+                                'include_successes': include_recommendations,
+                                'include_challenges': include_risks,
+                                'include_costs': include_costs,
+                                'include_planning': include_timeline,
+                                'custom_requests': custom_context
+                            }
+                        
+                        report_content = generate_enhanced_ai_report(
+                            mission_data_simple, 
+                            questions_data_simple,
+                            deepseek_api_key
+                        )
+                        
+                        if report_content:
+                            st.success("✅ Rapport généré avec succès!")
+                            
+                            # Affichage du rapport
+                            st.markdown("### 📄 Rapport généré")
+                            st.markdown(report_content)
+                            
+                            # Options d'export
+                            st.markdown("### 💾 Export du rapport")
+                            
+                            # Première ligne : formats de base
+                            col_txt, col_md, col_html = st.columns(3)
+                            
+                            with col_txt:
+                                st.download_button(
+                                    label="📄 Télécharger TXT",
+                                    data=report_content,
+                                    file_name=f"rapport_mission_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                                    mime="text/plain",
+                                    use_container_width=True
+                                )
+                            
+                            with col_md:
+                                st.download_button(
+                                    label="📝 Télécharger MD",
+                                    data=report_content,
+                                    file_name=f"rapport_mission_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                                    mime="text/markdown",
+                                    use_container_width=True
+                                )
+                            
+                            with col_html:
+                                # Conversion HTML pour PDF
+                                html_report = f"""
+                                <!DOCTYPE html>
+                                <html>
+                                <head>
+                                    <meta charset="UTF-8">
+                                    <title>Rapport de Mission</title>
+                                    <style>
+                                        body {{ font-family: Arial, sans-serif; margin: 40px; line-height: 1.6; }}
+                                        h1, h2, h3 {{ color: #2c3e50; }}
+                                        .header {{ text-align: center; margin-bottom: 30px; }}
+                                    </style>
+                                </head>
+                                <body>
+                                    <div class="header">
+                                        <h1>Rapport de Mission</h1>
+                                        <p>Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}</p>
+                                    </div>
+                                    {report_content.replace(chr(10), '<br>')}
+                                </body>
+                                </html>
+                                """
+                                
+                                st.download_button(
+                                    label="🌐 Télécharger HTML",
+                                    data=html_report,
+                                    file_name=f"rapport_mission_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
+                                    mime="text/html",
+                                    use_container_width=True
+                                )
+                            
+                            # Deuxième ligne : formats professionnels (PDF et Word)
+                            if PDF_AVAILABLE:
+                                st.markdown("#### 📋 Formats professionnels")
+                                col_pdf, col_word = st.columns(2)
+                                
+                                with col_pdf:
+                                    try:
+                                        pdf_data = create_pv_pdf(
+                                            content=report_content,
+                                            title="Rapport de Mission",
+                                            author="Responsable Mission"
+                                        )
+                                        st.download_button(
+                                            label="📄 Télécharger PDF",
+                                            data=pdf_data,
+                                            file_name=f"rapport_mission_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+                                            mime="application/pdf",
+                                            use_container_width=True
+                                        )
+                                    except Exception as e:
+                                        st.error(f"Erreur génération PDF: {str(e)}")
+                                
+                                with col_word:
+                                    try:
+                                        word_data = create_word_document(
+                                            content=report_content,
+                                            title="Rapport de Mission"
+                                        )
+                                        st.download_button(
+                                            label="📝 Télécharger Word (RTF)",
+                                            data=word_data,
+                                            file_name=f"rapport_mission_{datetime.now().strftime('%Y%m%d_%H%M')}.rtf",
+                                            mime="application/rtf",
+                                            use_container_width=True
+                                        )
+                                    except Exception as e:
+                                        st.error(f"Erreur génération Word: {str(e)}")
+                            else:
+                                st.info("💡 Installez reportlab pour activer l'export PDF et Word professionnel.")
+                        else:
+                            st.error("❌ Erreur lors de la génération du rapport")
+        
+        with tab_details:
+            st.markdown("### 📋 Collecte de données détaillées")
+            st.info("💡 Remplissez ces informations pour obtenir un rapport plus riche et personnalisé")
+            
+            # Interface de collecte de données enrichies
+            collect_enhanced_mission_data()
+        
+        with tab_questions:
+            st.markdown("### 🤖 Questions pour personnaliser le rapport")
+            st.info("💡 Répondez à ces questions pour que l'IA génère un rapport adapté à vos besoins")
+            
+            # Interface de questions interactives
+            questions_data = ask_interactive_questions()
+        
+        with tab_construction:
+            st.markdown("### 🏗️ Procès-verbal de visite de chantier")
+            st.info("💡 Générez un procès-verbal professionnel au format officiel")
+            
+            # Formulaire pour procès-verbal de chantier
+            st.markdown("#### 📋 Informations générales")
+            
+            col_pv1, col_pv2 = st.columns(2)
+            
+            with col_pv1:
+                pv_date = st.date_input("📅 Date de visite", value=datetime.now().date())
+                pv_site = st.text_input("🏗️ Site/Chantier", placeholder="Ex: Villengara et Kolda")
+                pv_structure = st.text_input("🏢 Structure", placeholder="Ex: DAL/GPR/ESP")
+                pv_zone = st.text_input("🗺️ Titre projet", placeholder="Ex: PA DAL zone SUD")
+            
+            with col_pv2:
+                pv_mission_type = st.selectbox(
+                    "📝 Type de mission",
+                    ["Visite de chantier", "Inspection technique", "Suivi de travaux", "Réception de travaux", "Autre"]
+                )
+                pv_responsable = st.text_input("👤 Responsable mission", placeholder="Ex: Moctar TALL")
+                pv_fonction = st.text_input("💼 Fonction", placeholder="Ex: Ingénieur")
+                pv_contact = st.text_input("📞 Contact", placeholder="Ex: +221 XX XXX XX XX")
+            
+            st.markdown("#### 🎯 Objectifs de la mission")
+            pv_objectifs = st.text_area(
+                "Décrivez les objectifs principaux",
+                placeholder="Ex: Contrôler l'avancement des travaux, vérifier la conformité, identifier les problèmes...",
+                height=100
+            )
+            
+            st.markdown("#### 📊 Observations et constats")
+            
+            # Sections d'observations
+            col_obs1, col_obs2 = st.columns(2)
+            
+            with col_obs1:
+                st.markdown("**🔍 Constats positifs**")
+                pv_positifs = st.text_area(
+                    "Points positifs observés",
+                    placeholder="Ex: Respect des délais, qualité des matériaux, sécurité...",
+                    height=120,
+                    key="pv_positifs"
+                )
+                
+                st.markdown("**⚠️ Points d'attention**")
+                pv_attention = st.text_area(
+                    "Points nécessitant une attention",
+                    placeholder="Ex: Retards mineurs, ajustements nécessaires...",
+                    height=120,
+                    key="pv_attention"
+                )
+            
+            with col_obs2:
+                st.markdown("**❌ Problèmes identifiés**")
+                pv_problemes = st.text_area(
+                    "Problèmes et non-conformités",
+                    placeholder="Ex: Défauts de construction, non-respect des normes...",
+                    height=120,
+                    key="pv_problemes"
+                )
+                
+                st.markdown("**💡 Recommandations**")
+                pv_recommandations = st.text_area(
+                    "Actions recommandées",
+                    placeholder="Ex: Corrections à apporter, améliorations suggérées...",
+                    height=120,
+                    key="pv_recommandations"
+                )
+            
+            st.markdown("#### 📈 Avancement et planning")
+            col_plan1, col_plan2 = st.columns(2)
+            
+            with col_plan1:
+                pv_avancement = st.slider("📊 Avancement global (%)", 0, 100, 50)
+                pv_respect_delais = st.selectbox("⏰ Respect des délais", ["Conforme", "Léger retard", "Retard important"])
+            
+            with col_plan2:
+                pv_prochaine_visite = st.date_input("📅 Prochaine visite prévue", value=datetime.now().date() + timedelta(days=30))
+                pv_urgence = st.selectbox("🚨 Niveau d'urgence", ["Faible", "Moyen", "Élevé", "Critique"])
+            
+            st.markdown("#### 👥 Participants et contacts")
+            pv_participants = st.text_area(
+                "Liste des participants à la visite",
+                placeholder="Ex: Moctar TALL (Ingénieur), Jean DUPONT (Chef de chantier), Marie MARTIN (Architecte)...",
+                height=80
+            )
+            
+            # Génération du procès-verbal
+            if st.button("📋 Générer le procès-verbal", type="primary", use_container_width=True):
+                if not deepseek_api_key:
+                    st.error("❌ Clé API DeepSeek manquante")
+                elif not pv_site or not pv_objectifs:
+                    st.error("❌ Veuillez remplir au minimum le site et les objectifs")
+                else:
+                    with st.spinner("🤖 Génération du procès-verbal en cours..."):
+                        # Données pour le procès-verbal
+                        pv_data = {
+                            'date': pv_date.strftime('%d/%m/%Y'),
+                            'site': pv_site,
+                            'structure': pv_structure,
+                            'zone': pv_zone,
+                            'mission_type': pv_mission_type,
+                            'responsable': pv_responsable,
+                            'fonction': pv_fonction,
+                            'contact': pv_contact,
+                            'objectifs': pv_objectifs,
+                            'positifs': pv_positifs,
+                            'attention': pv_attention,
+                            'problemes': pv_problemes,
+                            'recommandations': pv_recommandations,
+                            'avancement': pv_avancement,
+                            'respect_delais': pv_respect_delais,
+                            'prochaine_visite': pv_prochaine_visite.strftime('%d/%m/%Y'),
+                            'urgence': pv_urgence,
+                            'participants': pv_participants
+                        }
+                        
+                        # Génération avec l'IA
+                        pv_content = generate_construction_report(pv_data, deepseek_api_key)
+                        
+                        if pv_content:
+                            st.success("✅ Procès-verbal généré avec succès!")
+                            
+                            # Affichage du procès-verbal
+                            st.markdown("### 📄 Procès-verbal généré")
+                            st.markdown(pv_content)
+                            
+                            # Options d'export spécialisées
+                            st.markdown("### 💾 Export du procès-verbal")
+                            col_pv_txt, col_pv_pdf, col_pv_word = st.columns(3)
+                            
+                            with col_pv_txt:
+                                st.download_button(
+                                    label="📄 Format TXT",
+                                    data=pv_content,
+                                    file_name=f"PV_chantier_{pv_site.replace(' ', '_')}_{pv_date.strftime('%Y%m%d')}.txt",
+                                    mime="text/plain",
+                                    use_container_width=True
+                                )
+                            
+                            with col_pv_pdf:
+                                # HTML formaté pour impression PDF
+                                html_pv = f"""
+                                <!DOCTYPE html>
+                                <html>
+                                <head>
+                                    <meta charset="UTF-8">
+                                    <title>Procès-verbal de visite de chantier</title>
+                                    <style>
+                                        @page {{ margin: 2cm; }}
+                                        body {{ 
+                                            font-family: 'Times New Roman', serif; 
+                                            font-size: 12pt; 
+                                            line-height: 1.4; 
+                                            color: #000; 
+                                            margin: 0;
+                                        }}
+                                        .header {{ 
+                                            text-align: center; 
+                                            margin-bottom: 30px; 
+                                            border-bottom: 2px solid #000;
+                                            padding-bottom: 15px;
+                                        }}
+                                        .header h1 {{ 
+                                            font-size: 18pt; 
+                                            margin: 0; 
+                                            text-transform: uppercase;
+                                            font-weight: bold;
+                                        }}
+                                        .info-table {{ 
+                                            width: 100%; 
+                                            border-collapse: collapse; 
+                                            margin: 20px 0;
+                                        }}
+                                        .info-table td {{ 
+                                            border: 1px solid #000; 
+                                            padding: 8px; 
+                                            vertical-align: top;
+                                        }}
+                                        .info-table .label {{ 
+                                            background-color: #f0f0f0; 
+                                            font-weight: bold; 
+                                            width: 30%;
+                                        }}
+                                        h2 {{ 
+                                            font-size: 14pt; 
+                                            margin: 25px 0 10px 0; 
+                                            text-decoration: underline;
+                                            font-weight: bold;
+                                        }}
+                                        h3 {{ 
+                                            font-size: 12pt; 
+                                            margin: 20px 0 8px 0; 
+                                            font-weight: bold;
+                                        }}
+                                        .signature {{ 
+                                            margin-top: 40px; 
+                                            text-align: right;
+                                        }}
+                                        .signature-line {{ 
+                                            border-top: 1px solid #000; 
+                                            width: 200px; 
+                                            margin: 30px 0 5px auto;
+                                        }}
+                                        ul {{ margin-left: 20px; }}
+                                        li {{ margin-bottom: 5px; }}
+                                    </style>
+                                </head>
+                                <body>
+                                    <div class="header">
+                                        <h1>Procès-verbal de visite de chantier</h1>
+                                        <p><strong>{pv_structure}</strong></p>
+                                        <p>Travaux d'extension PA DAL zone {pv_zone}</p>
+                                    </div>
+                                    
+                                    <table class="info-table">
+                                        <tr>
+                                            <td class="label">DATE:</td>
+                                            <td>{pv_date.strftime('%d/%m/%Y')}</td>
+                                            <td class="label">SITE:</td>
+                                            <td>{pv_site}</td>
+                                        </tr>
+                                        <tr>
+                                            <td class="label">MISSION:</td>
+                                            <td>{pv_mission_type}</td>
+                                            <td class="label">ZONE:</td>
+                                            <td>{pv_zone}</td>
+                                        </tr>
+                                        <tr>
+                                            <td class="label">RESPONSABLE:</td>
+                                            <td>{pv_responsable}</td>
+                                            <td class="label">FONCTION:</td>
+                                            <td>{pv_fonction}</td>
+                                        </tr>
+                                    </table>
+                                    
+                                    {pv_content.replace(chr(10), '<br>')}
+                                    
+                                    <div class="signature">
+                                        <p>Fait à Dakar, le {datetime.now().strftime('%d/%m/%Y')}</p>
+                                        <div class="signature-line"></div>
+                                        <p><strong>{pv_responsable}</strong></p>
+                                    </div>
+                                </body>
+                                </html>
+                                """
+                                
+                                st.download_button(
+                                    label="📋 Format HTML",
+                                    data=html_pv,
+                                    file_name=f"PV_chantier_{pv_site.replace(' ', '_')}_{pv_date.strftime('%Y%m%d')}.html",
+                                    mime="text/html",
+                                    use_container_width=True
+                                )
+                            
+                            with col_pv_word:
+                                # Format Word-compatible
+                                word_content = f"""
+                                PROCÈS-VERBAL DE VISITE DE CHANTIER
+                                
+                                Structure: {pv_structure}
+                                Date: {pv_date.strftime('%d/%m/%Y')}
+                                Site: {pv_site}
+                                Zone: {pv_zone}
+                                
+                                {pv_content}
+                                
+                                Fait à Dakar, le {datetime.now().strftime('%d/%m/%Y')}
+                                
+                                {pv_responsable}
+                                {pv_fonction}
+                                """
+                                
+                                st.download_button(
+                                    label="📝 Format TXT",
+                                    data=word_content,
+                                    file_name=f"PV_chantier_{pv_site.replace(' ', '_')}_{pv_date.strftime('%Y%m%d')}.txt",
+                                    mime="text/plain",
+                                    use_container_width=True
+                                )
+                            
+                            # Deuxième ligne : formats professionnels (PDF et Word)
+                            if PDF_AVAILABLE:
+                                st.markdown("#### 📋 Formats professionnels")
+                                col_pv_pdf, col_pv_rtf = st.columns(2)
+                                
+                                with col_pv_pdf:
+                                    try:
+                                        # Contenu formaté pour le PV
+                                        pv_full_content = f"""Structure: {pv_structure}
+Date: {pv_date.strftime('%d/%m/%Y')}
+Site: {pv_site}
+Zone: {pv_zone}
+Mission: {pv_mission_type}
+Responsable: {pv_responsable}
+Fonction: {pv_fonction}
+
+{pv_content}"""
+                                        
+                                        pdf_data = create_pv_pdf(
+                                            content=pv_full_content,
+                                            title="Procès-verbal de visite de chantier",
+                                            author=pv_responsable
+                                        )
+                                        st.download_button(
+                                            label="📄 Télécharger PDF",
+                                            data=pdf_data,
+                                            file_name=f"PV_chantier_{pv_site.replace(' ', '_')}_{pv_date.strftime('%Y%m%d')}.pdf",
+                                            mime="application/pdf",
+                                            use_container_width=True
+                                        )
+                                    except Exception as e:
+                                        st.error(f"Erreur génération PDF: {str(e)}")
+                                
+                                with col_pv_rtf:
+                                    try:
+                                        rtf_data = create_word_document(
+                                            content=pv_full_content,
+                                            title="Procès-verbal de visite de chantier"
+                                        )
+                                        st.download_button(
+                                            label="📝 Télécharger Word (RTF)",
+                                            data=rtf_data,
+                                            file_name=f"PV_chantier_{pv_site.replace(' ', '_')}_{pv_date.strftime('%Y%m%d')}.rtf",
+                                            mime="application/rtf",
+                                            use_container_width=True
+                                        )
+                                    except Exception as e:
+                                        st.error(f"Erreur génération Word: {str(e)}")
+                            else:
+                                st.info("💡 Installez reportlab pour activer l'export PDF et Word professionnel.")
+                        else:
+                            st.error("❌ Erreur lors de la génération du procès-verbal")
+
+        with tab_generate:
+            st.markdown("### 🚀 Génération du rapport amélioré")
+            st.info("💡 Utilisez cette section après avoir rempli les détails et répondu aux questions")
+            
+            # Vérification des données disponibles
+            has_details = hasattr(st.session_state, 'mission_context') and st.session_state.mission_context.get('objective')
+            has_questions = 'report_focus' in st.session_state
+            
+            if has_details:
+                st.success("✅ Données détaillées collectées")
+            else:
+                st.warning("⚠️ Aucune donnée détaillée - Allez dans l'onglet 'Détails mission'")
+            
+            if has_questions:
+                st.success("✅ Questions répondues")
+            else:
+                st.warning("⚠️ Questions non répondues - Allez dans l'onglet 'Questions IA'")
+            
+            # Aperçu des paramètres
+            if has_questions:
+                st.markdown("**Paramètres du rapport :**")
+                col_preview1, col_preview2 = st.columns(2)
+                
+                with col_preview1:
+                    if 'report_focus' in st.session_state:
+                        st.write(f"🎯 **Focus :** {', '.join(st.session_state.report_focus)}")
+                    if 'target_audience' in st.session_state:
+                        st.write(f"👥 **Public :** {st.session_state.target_audience}")
+                
+                with col_preview2:
+                    if 'report_length' in st.session_state:
+                        st.write(f"📄 **Longueur :** {st.session_state.report_length}")
+                    if 'specific_request' in st.session_state and st.session_state.specific_request:
+                        st.write(f"✨ **Demande spéciale :** Oui")
+            
+            # Bouton de génération améliorée
+            col_gen1, col_gen2 = st.columns([2, 1])
+            
+            with col_gen1:
+                generate_enhanced = st.button(
+                    "🚀 Générer le rapport amélioré", 
+                    type="primary", 
+                    use_container_width=True,
+                    disabled=not (has_details or has_questions)
+                )
+            
+            with col_gen2:
+                if st.button("🔄 Réinitialiser", use_container_width=True):
+                    # Réinitialiser les données
+                    for key in list(st.session_state.keys()):
+                        if key.startswith(('mission_', 'activity_', 'report_', 'target_', 'specific_', 'notes_', 'success_', 'contacts_', 'outcomes_', 'follow_up_', 'challenges', 'lessons_', 'recommendations', 'overall_', 'highlight_', 'discuss_', 'future_', 'cost_', 'time_', 'stakeholder_', 'include_')):
+                            del st.session_state[key]
+                    st.rerun()
+            
+            if generate_enhanced:
+                if not deepseek_api_key:
+                    st.error("❌ Clé API DeepSeek manquante")
+                else:
+                    with st.spinner("🤖 Génération du rapport amélioré en cours..."):
+                        # Collecte des données de mission
+                        mission_data = collect_mission_data_for_ai()
+                        
+                        # Collecte des réponses aux questions
+                        questions_data = {
+                            'report_focus': st.session_state.get('report_focus', []),
+                            'target_audience': st.session_state.get('target_audience', 'Direction générale'),
+                            'report_length': st.session_state.get('report_length', 'Moyen (3-5 pages)'),
+                            'include_metrics': st.session_state.get('include_metrics', True),
+                            'highlight_successes': st.session_state.get('highlight_successes', True),
+                            'discuss_challenges': st.session_state.get('discuss_challenges', True),
+                            'future_planning': st.session_state.get('future_planning', True),
+                            'cost_analysis': st.session_state.get('cost_analysis', False),
+                            'time_efficiency': st.session_state.get('time_efficiency', True),
+                            'stakeholder_feedback': st.session_state.get('stakeholder_feedback', False),
+                            'specific_request': st.session_state.get('specific_request', '')
+                        }
+                        
+                        # Génération du rapport amélioré
+                        report_content = generate_enhanced_ai_report(
+                            mission_data, 
+                            questions_data,
+                            deepseek_api_key
+                        )
+                        
+                        if report_content:
+                            st.success("✅ Rapport amélioré généré avec succès!")
+                            
+                            # Affichage du rapport
+                            st.markdown("### 📄 Rapport généré")
+                            st.markdown(report_content)
+                            
+                            # Options d'export améliorées
+                            st.markdown("### 💾 Export du rapport")
+                            col_txt, col_md, col_html, col_copy = st.columns(4)
+                            
+                            with col_txt:
+                                st.download_button(
+                                    label="📄 TXT",
+                                    data=report_content,
+                                    file_name=f"rapport_ameliore_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                                    mime="text/plain",
+                                    use_container_width=True
+                                )
+                            
+                            with col_md:
+                                st.download_button(
+                                    label="📝 MD",
+                                    data=report_content,
+                                    file_name=f"rapport_ameliore_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                                    mime="text/markdown",
+                                    use_container_width=True
+                                )
+                            
+                            with col_html:
+                                # Conversion HTML améliorée
+                                html_report = f"""
+                                <!DOCTYPE html>
+                                <html>
+                                <head>
+                                    <meta charset="UTF-8">
+                                    <title>Rapport de Mission Amélioré</title>
+                                    <style>
+                                        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 40px; line-height: 1.6; color: #333; }}
+                                        h1, h2, h3 {{ color: #2c3e50; }}
+                                        h1 {{ border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
+                                        h2 {{ border-left: 4px solid #3498db; padding-left: 15px; }}
+                                        .header {{ text-align: center; margin-bottom: 30px; background: #f8f9fa; padding: 20px; border-radius: 10px; }}
+                                        .footer {{ margin-top: 30px; text-align: center; font-size: 0.9em; color: #666; }}
+                                        ul, ol {{ margin-left: 20px; }}
+                                        strong {{ color: #2c3e50; }}
+                                    </style>
+                                </head>
+                                <body>
+                                    <div class="header">
+                                        <h1>Rapport de Mission Amélioré</h1>
+                                        <p><strong>Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}</strong></p>
+                                        <p>Public cible: {questions_data.get('target_audience', 'Non spécifié')}</p>
+                                    </div>
+                                    {report_content.replace(chr(10), '<br>')}
+                                    <div class="footer">
+                                        <p>Rapport généré automatiquement par l'IA DeepSeek</p>
+                                    </div>
+                                </body>
+                                </html>
+                                """
+                                
+                                st.download_button(
+                                    label="🌐 HTML",
+                                    data=html_report,
+                                    file_name=f"rapport_ameliore_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
+                                    mime="text/html",
+                                    use_container_width=True
+                                )
+                            
+                            with col_copy:
+                                if st.button("📋 Copier", use_container_width=True):
+                                    st.write("📋 Contenu copié dans le presse-papiers!")
+                                    st.code(report_content, language=None)
+                        else:
+                            st.error("❌ Erreur lors de la génération du rapport")
+
 st.markdown("---")
-st.caption("🚀 Planificateur de Mission v2.3")
+st.caption("🚀 Planificateur de Mission v2.4 - Rapport IA")
 st.caption("💻 Developed by @Moctar")
