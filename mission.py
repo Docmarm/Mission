@@ -1339,17 +1339,18 @@ def two_opt_fixed_start_end(path, matrix):
                 break
     return path
 
+def haversine(lon1, lat1, lon2, lat2):
+    """Calcule la distance géodésique entre deux points en kilomètres"""
+    from math import radians, sin, cos, sqrt, atan2
+    R = 6371.0
+    dlon = radians(lon2 - lon1)
+    dlat = radians(lat2 - lat1)
+    a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
+    c = 2 * atan2(sqrt(a), sqrt(1-a))
+    return R * c
+
 def haversine_fallback_matrix(coords, kmh=95.0):
     """Calcule une matrice basée sur distances géodésiques"""
-    from math import radians, sin, cos, sqrt, atan2
-    
-    def haversine(lon1, lat1, lon2, lat2):
-        R = 6371.0
-        dlon = radians(lon2 - lon1)
-        dlat = radians(lat2 - lat1)
-        a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
-        c = 2 * atan2(sqrt(a), sqrt(1-a))
-        return R * c
     
     n = len(coords)
     durations = [[0.0]*n for _ in range(n)]
@@ -1484,7 +1485,7 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                        start_travel_time, end_travel_time,
                        use_lunch, lunch_start_time, lunch_end_time,
                        use_prayer, prayer_start_time, prayer_duration_min,
-                       max_days, tolerance_hours=1.0):
+                       max_days, tolerance_hours=1.0, base_location=None):
     """Génère le planning détaillé avec horaires différenciés pour activités et voyages"""
     sites_ordered = [sites[i] for i in order]
     coords_ordered = [coords[i] for i in order]
@@ -1765,6 +1766,11 @@ def schedule_itinerary(coords, sites, order, segments_summary,
     # Add final arrival marker
     if day_count > 0 and sites_ordered:
         last_city = sites_ordered[-1]['Ville'].upper()
+        
+        # Si on retourne à la base (Dakar par défaut), ajouter une nuitée
+        if base_location and last_city.upper() == base_location.upper():
+            itinerary.append((day_count, current_datetime, current_datetime, f"🏨 Nuitée à {base_location}"))
+        
         itinerary.append((day_count, current_datetime, current_datetime, f"📍 Arrivée {last_city} – Fin de mission"))
     
     if max_days > 0 and day_count > max_days:
@@ -1813,6 +1819,13 @@ def build_professional_html(itinerary, start_date, stats, sites_ordered, segment
         by_day.setdefault(day, []).append((sdt, edt, desc))
         
         if "Nuitée à" in desc or "nuitée à" in desc:
+            if " à " in desc:
+                parts = desc.split(" à ")
+                if len(parts) >= 2:
+                    city = parts[1].strip().split("(")[0].strip().split(" ")[0]
+                    night_locations[day] = city.upper()
+        elif "🏨" in desc and ("Nuitée" in desc or "nuitée" in desc):
+            # Gestion spécifique pour les descriptions avec emoji 🏨
             if " à " in desc:
                 parts = desc.split(" à ")
                 if len(parts) >= 2:
@@ -2903,7 +2916,8 @@ if plan_button:
         prayer_start_time=prayer_start_time if use_prayer else time(14,0),
         prayer_duration_min=prayer_duration_min if use_prayer else 20,
         max_days=max_days,
-        tolerance_hours=tolerance_hours
+        tolerance_hours=tolerance_hours,
+        base_location=base_location
     )
     
     progress.progress(1.0)
@@ -2921,7 +2935,8 @@ if plan_button:
         'original_order': order.copy(),  # Sauvegarder l'ordre original
         'durations_matrix': durations_sec,
         'distances_matrix': distances_m,
-        'all_coords': coords
+        'all_coords': coords,
+        'base_location': base_location
     }
     st.session_state.manual_itinerary = None
     st.session_state.edit_mode = False
@@ -3346,7 +3361,8 @@ if st.session_state.planning_results:
                         prayer_start_time=time(14, 0),
                         prayer_duration_min=20,
                         max_days=30,
-                        tolerance_hours=1.0
+                        tolerance_hours=1.0,
+                        base_location=results.get('base_location', '')
                     )
                     
                     # Mettre à jour les résultats
