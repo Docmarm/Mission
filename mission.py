@@ -85,6 +85,83 @@ if 'manual_itinerary' not in st.session_state:
     st.session_state.manual_itinerary = None
 
 # --------------------------
+# FONCTIONS CARBURANT ET EMPREINTE CARBONE
+# --------------------------
+
+def get_vehicle_types():
+    """Retourne les types de véhicules disponibles avec leurs consommations"""
+    return {
+        "Station-Wagon": {"consumption": 13.0, "fuel_type": "Essence", "co2_factor": 2.31},
+        "Berline": {"consumption": 9.5, "fuel_type": "Essence", "co2_factor": 2.31},
+        "SUV": {"consumption": 15.0, "fuel_type": "Essence", "co2_factor": 2.31},
+        "4x4": {"consumption": 18.0, "fuel_type": "Diesel", "co2_factor": 2.68},
+        "Utilitaire": {"consumption": 12.0, "fuel_type": "Diesel", "co2_factor": 2.68},
+        "Minibus": {"consumption": 20.0, "fuel_type": "Diesel", "co2_factor": 2.68},
+     }
+
+def calculate_fuel_consumption(total_distance_km, vehicle_type):
+    """Calcule la consommation de carburant pour un véhicule donné"""
+    vehicles = get_vehicle_types()
+    if vehicle_type not in vehicles:
+        return None
+    
+    consumption_per_100km = vehicles[vehicle_type]["consumption"]
+    fuel_needed = (total_distance_km * consumption_per_100km) / 100
+    
+    return {
+        "fuel_needed_liters": fuel_needed,
+        "consumption_per_100km": consumption_per_100km,
+        "fuel_type": vehicles[vehicle_type]["fuel_type"]
+    }
+
+def calculate_carbon_footprint(fuel_consumption_data, total_distance_km, vehicle_type):
+    """Calcule l'empreinte carbone de la mission"""
+    vehicles = get_vehicle_types()
+    if vehicle_type not in vehicles or not fuel_consumption_data:
+        return None
+    
+    # Facteur d'émission CO2 (kg CO2 par litre de carburant)
+    co2_factor = vehicles[vehicle_type]["co2_factor"]
+    
+    # Calcul des émissions CO2
+    co2_emissions_kg = fuel_consumption_data["fuel_needed_liters"] * co2_factor
+    co2_emissions_tons = co2_emissions_kg / 1000
+    
+    # Équivalences pour contextualiser
+    trees_needed = co2_emissions_kg / 22  # Un arbre absorbe ~22kg CO2/an
+    
+    return {
+        "co2_emissions_kg": co2_emissions_kg,
+        "co2_emissions_tons": co2_emissions_tons,
+        "trees_equivalent": trees_needed,
+        "fuel_type": fuel_consumption_data["fuel_type"],
+        "distance_km": total_distance_km
+    }
+
+def estimate_fuel_cost(fuel_consumption_data, fuel_price_per_liter=None):
+    """Estime le coût du carburant"""
+    if not fuel_consumption_data:
+        return None
+    
+    # Prix par défaut au Sénégal (en FCFA)
+    default_prices = {
+        "Essence": 1350,  # FCFA par litre
+        "Diesel": 1200    # FCFA par litre
+    }
+    
+    fuel_type = fuel_consumption_data["fuel_type"]
+    price = fuel_price_per_liter if fuel_price_per_liter else default_prices.get(fuel_type, 1300)
+    
+    total_cost = fuel_consumption_data["fuel_needed_liters"] * price
+    
+    return {
+        "total_cost_fcfa": total_cost,
+        "price_per_liter": price,
+        "fuel_type": fuel_type,
+        "liters": fuel_consumption_data["fuel_needed_liters"]
+    }
+
+# --------------------------
 # FONCTIONS RAPPORT IA
 # --------------------------
 def collect_mission_data_for_ai():
@@ -2969,7 +3046,7 @@ if st.session_state.planning_results:
     with col4:
         st.metric("Temps de visite", f"{stats['total_visit_hours']:.1f} h")
     
-    tab_planning, tab_edit, tab_manual, tab_map, tab_export = st.tabs(["📅 Planning", "✏️ Éditer", "🔄 Modifier ordre", "🗺️ Carte", "💾 Export"])
+    tab_planning, tab_fuel, tab_edit, tab_manual, tab_map, tab_export = st.tabs(["📅 Planning", "⛽ Carburant", "✏️ Éditer", "🔄 Modifier ordre", "🗺️ Carte", "💾 Export"])
     
     with tab_planning:
         st.subheader("Planning détaillé")
@@ -3047,6 +3124,93 @@ if st.session_state.planning_results:
                             st.warning(desc)
                         else:
                             st.write(desc)
+    
+    with tab_fuel:
+        st.subheader("⛽ Module Carburant")
+        
+        if st.session_state.planning_results is None:
+            st.warning("⚠️ Veuillez d'abord générer un planning dans l'onglet 'Planning' pour calculer la consommation de carburant.")
+        else:
+            # Récupérer la distance totale du planning
+            stats = st.session_state.planning_results.get('stats', {})
+            total_distance_km = stats.get('total_km', 0)
+            
+            if total_distance_km > 0:
+                st.info(f"📏 **Distance totale de la mission :** {total_distance_km:.1f} km")
+                
+                # Sélection du type de véhicule
+                st.subheader("🚗 Sélection du véhicule")
+                
+                vehicle_types = get_vehicle_types()
+                vehicle_names = list(vehicle_types.keys())
+                
+                # Station-Wagon par défaut
+                default_index = vehicle_names.index("Station-Wagon") if "Station-Wagon" in vehicle_names else 0
+                
+                selected_vehicle = st.selectbox(
+                    "Type de véhicule",
+                    options=vehicle_names,
+                    index=default_index,
+                    help="Sélectionnez le type de véhicule pour calculer la consommation"
+                )
+                
+                # Affichage des caractéristiques du véhicule sélectionné
+                vehicle_info = vehicle_types[selected_vehicle]
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Consommation", f"{vehicle_info['consumption']} L/100km")
+                with col2:
+                    st.metric("Facteur CO₂", f"{vehicle_info['co2_factor']} kg CO₂/L")
+                
+                st.divider()
+                
+                # Calculs de consommation et d'empreinte carbone
+                fuel_data = calculate_fuel_consumption(total_distance_km, selected_vehicle)
+                carbon_data = calculate_carbon_footprint(fuel_data, total_distance_km, selected_vehicle)
+                cost_data = estimate_fuel_cost(fuel_data)
+                
+                # Affichage des résultats
+                st.subheader("📊 Résultats des calculs")
+                
+                # Métriques principales
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.metric(
+                        "🛢️ Carburant nécessaire",
+                        f"{fuel_data['fuel_needed_liters']:.1f} L",
+                        help="Quantité de carburant nécessaire pour la mission"
+                    )
+                
+                with col2:
+                    st.metric(
+                        "🌍 CO₂ émis",
+                        f"{carbon_data['co2_emissions_kg']:.1f} kg",
+                        help="Émissions de CO₂ pour la mission"
+                    )
+                
+                st.divider()
+                
+                # Détails de l'empreinte carbone
+                st.subheader("🌱 Empreinte carbone détaillée")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.write("**Émissions CO₂ :**")
+                    st.write(f"• En kilogrammes : **{carbon_data['co2_emissions_kg']:.2f} kg**")
+                    st.write(f"• En tonnes : **{carbon_data['co2_emissions_tons']:.3f} tonnes**")
+                
+                with col2:
+                    st.write("**Équivalence environnementale :**")
+                    st.write(f"• Arbres à planter pour compenser : **{carbon_data['trees_equivalent']:.0f} arbres**")
+                    st.write("• *(1 arbre absorbe ~22 kg CO₂/an)*")
+                
+
+                
+            else:
+                st.error("❌ Aucune distance calculée. Vérifiez votre planning.")
     
     with tab_edit:
         st.subheader("✏️ Édition manuelle du planning")
