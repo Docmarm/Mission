@@ -18,7 +18,7 @@ st.set_page_config(
 
 # Import des modules pour l'export PDF et Word
 try:
-    from pdf_generator import create_pv_pdf, create_word_document
+    from pdf_generator import create_pv_pdf, create_word_document, create_mission_pdf
     PDF_AVAILABLE = True
 except ImportError:
     PDF_AVAILABLE = False
@@ -33,78 +33,11 @@ from streamlit_folium import st_folium
 # --------------------------
 # AUTHENTIFICATION
 # --------------------------
-if 'authenticated' not in st.session_state:
-    st.session_state.authenticated = False
-
-# Initialiser le compteur d'essais
-if 'failed_attempts' not in st.session_state:
-    st.session_state.failed_attempts = 0
-
-# Vérifier si l'utilisateur est bloqué
-if 'blocked' not in st.session_state:
-    st.session_state.blocked = False
-
-if not st.session_state.authenticated:
-    st.title("🔐 Accès à l'application")
-    st.markdown("---")
-    
-    # Vérifier si l'utilisateur est bloqué après 3 essais
-    if st.session_state.blocked or st.session_state.failed_attempts >= 3:
-        st.error("🚨 **ACCÈS BLOQUÉ - MENACE DE SÉCURITÉ ACTIVÉE** 🚨")
-        st.markdown("---")
-        st.markdown("""
-        <div style="background-color: #ff4444; color: white; padding: 20px; border-radius: 10px; text-align: center;">
-        <h2>⚠️ AVERTISSEMENT CRITIQUE ⚠️</h2>
-        <p style="font-size: 18px; font-weight: bold;">
-        Vous avez dépassé le nombre maximum de tentatives autorisées (3 essais).
-        </p>
-        <p style="font-size: 16px;">
-        🔥 <strong>MENACE ACTIVÉE :</strong> L'ensemble des données de votre ordinateur sera supprimé si vous continuez à essayer d'accéder à cette application sans autorisation.
-        </p>
-        <p style="font-size: 14px;">
-        💀 Système de sécurité avancé activé - Toute tentative supplémentaire déclenchera la procédure de suppression automatique.
-        </p>
-        <p style="font-size: 12px; margin-top: 20px;">
-        Pour débloquer l'accès, contactez l'administrateur système.
-        </p>
-        </div>
-        """, unsafe_allow_html=True)
-        st.stop()
-    
-    st.markdown("### Question de sécurité")
-    st.info("Pour accéder à l'application, veuillez répondre à la question suivante :")
-    
-    # Afficher le nombre d'essais restants
-    remaining_attempts = 3 - st.session_state.failed_attempts
-    if st.session_state.failed_attempts > 0:
-        st.warning(f"⚠️ Attention : Il vous reste {remaining_attempts} essai(s) avant le blocage définitif.")
-    
-    question = st.text_input("Qui a créé cette application ?", type="password")
-    
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col2:
-        if st.button("🚀 Accéder", type="primary", use_container_width=True):
-            if question.strip().lower() == "moctar tall":
-                st.session_state.authenticated = True
-                st.session_state.failed_attempts = 0  # Réinitialiser le compteur en cas de succès
-                st.success("✅ Accès autorisé ! Redirection en cours...")
-                st.rerun()
-            else:
-                st.session_state.failed_attempts += 1
-                remaining = 3 - st.session_state.failed_attempts
-                
-                if st.session_state.failed_attempts >= 3:
-                    st.session_state.blocked = True
-                    st.error("🚨 ACCÈS BLOQUÉ ! Nombre maximum de tentatives atteint.")
-                    st.rerun()
-                else:
-                    st.error(f"❌ Réponse incorrecte. Accès refusé. ({remaining} essai(s) restant(s))")
-    
-    st.markdown("---")
-    st.stop()
+# INITIALISATION DES VARIABLES DE SESSION
+# --------------------------
 
 st.title("🗺️ Planificateur de mission (Moctar)")
-st.caption("Optimisation d'itinéraire + planning journalier + carte interactive + édition manuelle")
+st.caption("Optimisation d'itinéraire + planning journalier + carte interactive + édition de rapport")
 
 # --------------------------
 # SIDEBAR: KEYS & OPTIONS
@@ -1188,6 +1121,14 @@ def improved_graphhopper_duration_matrix(api_key, coords):
         if len(coords) > 25:
             return None, None, f"Trop de points ({len(coords)}), limite: 25"
         
+        # Vérifier que toutes les coordonnées sont valides
+        for i, coord in enumerate(coords):
+            if not coord or len(coord) != 2:
+                return None, None, f"Coordonnées invalides pour le point {i+1}"
+            lon, lat = coord
+            if not (-180 <= lon <= 180) or not (-90 <= lat <= 90):
+                return None, None, f"Coordonnées hors limites pour le point {i+1}: ({lon}, {lat})"
+        
         points = [[coord[0], coord[1]] for coord in coords]
         
         url = "https://graphhopper.com/api/1/matrix"
@@ -1205,6 +1146,14 @@ def improved_graphhopper_duration_matrix(api_key, coords):
         if response.status_code != 200:
             if response.status_code == 401:
                 return None, None, "Clé API invalide"
+            elif response.status_code == 400:
+                # Erreur HTTP 400 - Requête malformée
+                try:
+                    error_detail = response.json()
+                    error_msg = error_detail.get('message', 'Requête invalide')
+                    return None, None, f"Erreur HTTP 400: {error_msg}. Vérifiez que toutes les villes sont valides et géolocalisables."
+                except:
+                    return None, None, "Erreur HTTP 400: Requête invalide. Vérifiez que toutes les villes sont valides et géolocalisables."
             elif response.status_code == 429:
                 return None, None, "Limite de requêtes atteinte"
             else:
@@ -1323,8 +1272,10 @@ def solve_tsp_fixed_start_end(matrix):
         return list(range(n))
     
     if n > 10:
-        st.warning("Plus de 10 sites: utilisation d'une heuristique rapide")
-        return solve_tsp_nearest_neighbor(matrix)
+        st.warning("Plus de 10 sites: heuristique voisin + 2-opt")
+        nn_path = solve_tsp_nearest_neighbor(matrix)
+        improved_path = two_opt_fixed_start_end(nn_path, matrix)
+        return improved_path
     
     nodes = list(range(1, n-1))
     best_order = None
@@ -1340,7 +1291,13 @@ def solve_tsp_fixed_start_end(matrix):
             best_time = total_time
             best_order = perm
     
-    return [0] + list(best_order) + [n-1]
+    best_path = [0] + list(best_order) + [n-1]
+    # Lissage via 2-opt si des incohérences existent
+    try:
+        best_path = two_opt_fixed_start_end(best_path, matrix)
+    except Exception:
+        pass
+    return best_path
 
 def solve_tsp_nearest_neighbor(matrix):
     """Heuristique du plus proche voisin"""
@@ -1358,6 +1315,30 @@ def solve_tsp_nearest_neighbor(matrix):
     path.append(n-1)
     return path
 
+def path_cost(path, matrix):
+    total = 0
+    for i in range(len(path)-1):
+        total += matrix[path[i]][path[i+1]]
+    return total
+
+def two_opt_fixed_start_end(path, matrix):
+    """Amélioration locale 2-opt en conservant départ (0) et arrivée (n-1)"""
+    if not path or len(path) < 4:
+        return path
+    improved = True
+    while improved:
+        improved = False
+        for i in range(1, len(path)-2):
+            for k in range(i+1, len(path)-1):
+                new_path = path[:i] + path[i:k+1][::-1] + path[k+1:]
+                if path_cost(new_path, matrix) < path_cost(path, matrix):
+                    path = new_path
+                    improved = True
+                    break
+            if improved:
+                break
+    return path
+
 def haversine_fallback_matrix(coords, kmh=60.0):
     """Calcule une matrice basée sur distances géodésiques"""
     from math import radians, sin, cos, sqrt, atan2
@@ -1371,26 +1352,139 @@ def haversine_fallback_matrix(coords, kmh=60.0):
         return R * c
     
     n = len(coords)
-    durations = [[0]*n for _ in range(n)]
-    distances = [[0]*n for _ in range(n)]
+    durations = [[0.0]*n for _ in range(n)]
+    distances = [[0.0]*n for _ in range(n)]
     
     for i in range(n):
         for j in range(n):
             if i != j:
                 km = haversine(coords[i][0], coords[i][1], coords[j][0], coords[j][1])
+                # Facteur de correction pour tenir compte des routes réelles
                 km *= 1.2
                 hours = km / kmh
-                durations[i][j] = int(hours * 3600)
-                distances[i][j] = int(km * 1000)
+                # Retourner les durées en secondes (cohérent avec GraphHopper)
+                durations[i][j] = hours * 3600
+                # Retourner les distances en mètres (cohérent avec GraphHopper)
+                distances[i][j] = km * 1000
     
     return durations, distances
+
+def optimize_route_with_ai(sites, coords, base_location=None, api_key=None):
+    """
+    Optimise l'ordre des sites en utilisant l'IA DeepSeek
+    
+    Args:
+        sites: Liste des sites avec leurs informations
+        coords: Liste des coordonnées correspondantes
+        base_location: Point de départ/arrivée (optionnel)
+        api_key: Clé API DeepSeek
+    
+    Returns:
+        tuple: (ordre_optimal, success, message)
+    """
+    if not api_key:
+        return list(range(len(sites))), False, "Clé API DeepSeek manquante"
+    
+    try:
+        # Préparer les données des sites pour l'IA
+        sites_info = []
+        for i, site in enumerate(sites):
+            site_data = {
+                "index": i,
+                "ville": site.get("Ville", f"Site {i}"),
+                "type": site.get("Type", "Non spécifié"),
+                "activite": site.get("Activité", "Non spécifié"),
+                "duree": site.get("Durée (h)", 1.0),
+                "coordonnees": coords[i] if i < len(coords) else None
+            }
+            sites_info.append(site_data)
+        
+        # Construire le prompt pour l'IA
+        prompt = f"""Tu es un expert en optimisation d'itinéraires au Sénégal. 
+
+MISSION: Optimise l'ordre de visite des sites suivants pour minimiser le temps de trajet total.
+
+SITES À VISITER:
+"""
+        
+        for site in sites_info:
+            coord_str = f"({site['coordonnees'][0]:.4f}, {site['coordonnees'][1]:.4f})" if site['coordonnees'] else "Coordonnées inconnues"
+            prompt += f"- Site {site['index']}: {site['ville']} - {site['type']} - {site['activite']} ({site['duree']}h) - {coord_str}\n"
+        
+        if base_location:
+            prompt += f"\nPOINT DE DÉPART/ARRIVÉE: {base_location}\n"
+        
+        prompt += """
+CONTRAINTES:
+- Minimiser la distance totale de trajet
+- Tenir compte de la géographie du Sénégal
+- Considérer les types d'activités (regrouper les activités similaires si logique)
+- Optimiser pour un trajet efficace
+
+RÉPONSE ATTENDUE:
+Fournis UNIQUEMENT la liste des indices dans l'ordre optimal, séparés par des virgules.
+Exemple: 0,2,1,3,4
+
+Ne fournis AUCUNE explication, juste la séquence d'indices."""
+
+        # Appel à l'API DeepSeek
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "model": "deepseek-chat",
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.1,
+            "max_tokens": 100
+        }
+        
+        response = requests.post(
+            "https://api.deepseek.com/chat/completions",
+            headers=headers,
+            json=data,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            ai_response = result["choices"][0]["message"]["content"].strip()
+            
+            # Parser la réponse de l'IA
+            try:
+                # Extraire les indices de la réponse
+                indices_str = ai_response.split('\n')[0].strip()
+                indices = [int(x.strip()) for x in indices_str.split(',')]
+                
+                # Vérifier que tous les indices sont valides
+                if len(indices) == len(sites) and set(indices) == set(range(len(sites))):
+                    return indices, True, "Optimisation IA réussie"
+                else:
+                    # Fallback: ordre original si la réponse IA est invalide
+                    return list(range(len(sites))), False, f"Réponse IA invalide: {ai_response[:100]}..."
+                    
+            except (ValueError, IndexError) as e:
+                return list(range(len(sites))), False, f"Erreur parsing réponse IA: {str(e)}"
+        
+        else:
+            return list(range(len(sites))), False, f"Erreur API DeepSeek: {response.status_code}"
+            
+    except requests.exceptions.Timeout:
+        return list(range(len(sites))), False, "Timeout API DeepSeek"
+    except requests.exceptions.RequestException as e:
+        return list(range(len(sites))), False, f"Erreur réseau: {str(e)}"
+    except Exception as e:
+        return list(range(len(sites))), False, f"Erreur inattendue: {str(e)}"
 
 def schedule_itinerary(coords, sites, order, segments_summary,
                        start_date, start_activity_time, end_activity_time,
                        start_travel_time, end_travel_time,
                        use_lunch, lunch_start_time, lunch_end_time,
                        use_prayer, prayer_start_time, prayer_duration_min,
-                       max_days):
+                       max_days, tolerance_hours=1.0):
     """Génère le planning détaillé avec horaires différenciés pour activités et voyages"""
     sites_ordered = [sites[i] for i in order]
     coords_ordered = [coords[i] for i in order]
@@ -1399,6 +1493,10 @@ def schedule_itinerary(coords, sites, order, segments_summary,
     day_end_time = datetime.combine(start_date, end_travel_time)  # End with travel time
     day_count = 1
     itinerary = []
+    
+    # Suivi des pauses par jour pour éviter les doublons
+    daily_lunch_added = {}  # {day_count: bool}
+    daily_prayer_added = {}  # {day_count: bool}
     
     total_km = 0
     total_visit_hours = 0
@@ -1412,8 +1510,19 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                 travel_sec = seg.get("duration", 0)
                 travel_km = seg.get("distance", 0) / 1000.0
                 
+                # Debug: Afficher les valeurs reçues
+                if debug_mode:
+                    st.info(f"🔍 Debug Segment {seg_idx}: travel_sec={travel_sec}, travel_km={travel_km:.2f}")
+                
+                # Si les données sont nulles, utiliser des valeurs par défaut simples
                 if travel_sec <= 0:
-                    travel_sec = 3600
+                    travel_sec = 3600  # 1 heure par défaut
+                    if debug_mode:
+                        st.warning(f"🔍 travel_sec était ≤ 0, fixé à 3600s (1h)")
+                if travel_km <= 0:
+                    travel_km = 50  # 50 km par défaut
+                    if debug_mode:
+                        st.warning(f"🔍 travel_km était ≤ 0, fixé à 50km")
                 
                 total_km += travel_km
                 
@@ -1453,7 +1562,7 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                 
                 travel_added = False
                 
-                if use_lunch and lunch_window_start and lunch_window_end:
+                if use_lunch and lunch_window_start and lunch_window_end and not daily_lunch_added.get(day_count, False):
                     if current_datetime < lunch_window_end and travel_end > lunch_window_start:
                         lunch_time = max(current_datetime, lunch_window_start)
                         lunch_end_time_actual = lunch_time + timedelta(hours=1)
@@ -1468,6 +1577,7 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                         
                         # Add lunch break
                         itinerary.append((day_count, lunch_time, lunch_end_time_actual, "🍽️ Déjeuner (≤1h)"))
+                        daily_lunch_added[day_count] = True  # Marquer le déjeuner comme ajouté pour ce jour
                         current_datetime = lunch_end_time_actual
                         
                         # Recalculate remaining travel time
@@ -1475,7 +1585,7 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                         travel_end = current_datetime + remaining_travel
                 
                 # Handle prayer break during travel (only if no lunch break)
-                elif use_prayer and prayer_start_time:
+                elif use_prayer and prayer_start_time and not daily_prayer_added.get(day_count, False):
                     prayer_window_start = datetime.combine(current_datetime.date(), prayer_start_time)
                     prayer_window_end = prayer_window_start + timedelta(hours=2)
                     
@@ -1493,6 +1603,7 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                         
                         # Add prayer break
                         itinerary.append((day_count, prayer_time, prayer_end_time, "🙏 Prière (≤20 min)"))
+                        daily_prayer_added[day_count] = True  # Marquer la prière comme ajoutée pour ce jour
                         current_datetime = prayer_end_time
                         
                         # Recalculate remaining travel time
@@ -1522,24 +1633,43 @@ def schedule_itinerary(coords, sites, order, segments_summary,
             
             # Check if visit extends beyond activity hours
             activity_end_time = datetime.combine(current_datetime.date(), end_activity_time)
+            tolerance_end_time = activity_end_time + timedelta(hours=tolerance_hours)
+            
+            # Vérifier si l'activité peut continuer (nouvelle option)
+            can_continue = site.get('Peut continuer', False)  # Par défaut False
             
             # Handle visit that extends beyond activity hours
             if visit_end > activity_end_time:
-                if current_datetime < activity_end_time:
-                    # Add partial visit for current day
-                    itinerary.append((day_count, current_datetime, activity_end_time, f"{visit_desc} (à continuer)"))
-                
-                # End current day
-                itinerary.append((day_count, activity_end_time, activity_end_time, "🏁 Fin de journée"))
-                itinerary.append((day_count, activity_end_time, activity_end_time, f"🏨 Nuitée à {city}"))
-                
-                # Start next day
-                remaining = visit_end - activity_end_time
-                day_count += 1
-                current_datetime = datetime.combine(start_date + timedelta(days=day_count-1), start_activity_time)
-                day_end_time = datetime.combine(start_date + timedelta(days=day_count-1), end_travel_time)
-                visit_end = current_datetime + remaining
-                visit_desc = f"Suite {visit_desc}"
+                # Si l'activité se termine dans le seuil de tolérance, elle peut continuer le même jour
+                if visit_end <= tolerance_end_time and can_continue:
+                    # L'activité continue sur le même jour malgré le dépassement
+                    pass  # Pas de division, traitement normal
+                elif can_continue:
+                    # L'activité dépasse le seuil de tolérance et peut être divisée
+                    if current_datetime < activity_end_time:
+                        # Add partial visit for current day
+                        itinerary.append((day_count, current_datetime, activity_end_time, f"{visit_desc} (à continuer)"))
+                    
+                    # End current day
+                    itinerary.append((day_count, activity_end_time, activity_end_time, "🏁 Fin de journée"))
+                    itinerary.append((day_count, activity_end_time, activity_end_time, f"🏨 Nuitée à {city}"))
+                    
+                    # Start next day
+                    remaining = visit_end - activity_end_time
+                    day_count += 1
+                    current_datetime = datetime.combine(start_date + timedelta(days=day_count-1), start_activity_time)
+                    day_end_time = datetime.combine(start_date + timedelta(days=day_count-1), end_travel_time)
+                    visit_end = current_datetime + remaining
+                    visit_desc = f"Suite {visit_desc}"
+                else:
+                    # L'activité ne peut pas continuer - la forcer à se terminer à l'heure limite
+                    visit_end = activity_end_time
+                    if current_datetime >= activity_end_time:
+                        # Si on est déjà en dehors des heures, reporter au jour suivant
+                        day_count += 1
+                        current_datetime = datetime.combine(start_date + timedelta(days=day_count-1), start_activity_time)
+                        day_end_time = datetime.combine(start_date + timedelta(days=day_count-1), end_travel_time)
+                        visit_end = current_datetime + visit_duration
             
             # Handle breaks during visit (only if visit fits in current day)
             if visit_end <= activity_end_time:
@@ -1550,7 +1680,7 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                 prayer_window_end = prayer_window_start + timedelta(hours=2) if use_prayer else None
                 
                 # Check for lunch break during visit
-                if use_lunch and lunch_window_start and lunch_window_end:
+                if use_lunch and lunch_window_start and lunch_window_end and not daily_lunch_added.get(day_count, False):
                     if current_datetime < lunch_window_end and visit_end > lunch_window_start:
                         lunch_time = max(current_datetime, lunch_window_start)
                         lunch_end_time_actual = min(lunch_time + timedelta(hours=1), lunch_window_end)
@@ -1561,6 +1691,7 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                         
                         # Add lunch break
                         itinerary.append((day_count, lunch_time, lunch_end_time_actual, "🍽️ Déjeuner (≤1h)"))
+                        daily_lunch_added[day_count] = True  # Marquer le déjeuner comme ajouté pour ce jour
                         
                         # Update timing for remaining visit
                         current_datetime = lunch_end_time_actual
@@ -1569,7 +1700,7 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                         visit_desc = f"Suite {visit_desc}" if lunch_time > current_datetime else visit_desc
                 
                 # Check for prayer break during visit (only if no lunch break was added)
-                elif use_prayer and prayer_window_start and prayer_window_end:
+                elif use_prayer and prayer_window_start and prayer_window_end and not daily_prayer_added.get(day_count, False):
                     if current_datetime < prayer_window_end and visit_end > prayer_window_start:
                         prayer_time = max(current_datetime, prayer_window_start)
                         prayer_end_time = min(prayer_time + timedelta(minutes=prayer_duration_min), prayer_window_end)
@@ -1580,6 +1711,7 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                         
                         # Add prayer break
                         itinerary.append((day_count, prayer_time, prayer_end_time, "🙏 Prière (≤20 min)"))
+                        daily_prayer_added[day_count] = True  # Marquer la prière comme ajoutée pour ce jour
                         
                         # Update timing for remaining visit
                         current_datetime = prayer_end_time
@@ -1620,7 +1752,7 @@ def schedule_itinerary(coords, sites, order, segments_summary,
     
     return itinerary, sites_ordered, coords_ordered, stats
 
-def build_professional_html(itinerary, start_date, stats, sites_ordered, segments_summary=None, speed_kmh=110):
+def build_professional_html(itinerary, start_date, stats, sites_ordered, segments_summary=None, speed_kmh=110, mission_title="Mission Terrain"):
     """Génère un HTML professionnel"""
     def fmt_time(dt):
         return dt.strftime("%Hh%M")
@@ -1698,7 +1830,7 @@ def build_professional_html(itinerary, start_date, stats, sites_ordered, segment
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Planning Mission Terrain ({date_range})</title>
+    <title>Planning {mission_title} ({date_range})</title>
     <style>
         body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f5f5f5; }}
         .container {{ max-width: 1200px; margin: 0 auto; background: white; border-radius: 10px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
@@ -1721,7 +1853,7 @@ def build_professional_html(itinerary, start_date, stats, sites_ordered, segment
 </head>
 <body>
 <div class="container">
-    <h1>📋 Mission Terrain – {date_range}</h1>
+    <h1>📋 {mission_title} – {date_range}</h1>
     <p class="subtitle">{stats['total_days']} jours / {num_nights} nuitée{'s' if num_nights > 1 else ''} • Pauses flexibles : déjeuner (13h00–14h30 ≤ 1h) & prière (14h00–15h00 ≤ 20 min)</p>
 
     <table>
@@ -1815,6 +1947,156 @@ def build_professional_html(itinerary, start_date, stats, sites_ordered, segment
 
     return html
 
+def create_mission_excel(itinerary, start_date, stats, sites_ordered, segments_summary=None, mission_title="Mission Terrain"):
+    """
+    Génère un fichier Excel professionnel à partir des données de planning
+    """
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils.dataframe import dataframe_to_rows
+    
+    # Créer un workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Planning Mission"
+    
+    # Styles
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="2E86AB", end_color="2E86AB", fill_type="solid")
+    subheader_font = Font(bold=True, color="2E86AB")
+    border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
+    center_alignment = Alignment(horizontal='center', vertical='center')
+    
+    # En-tête principal
+    ws.merge_cells('A1:F1')
+    ws['A1'] = mission_title
+    ws['A1'].font = Font(bold=True, size=16, color="2E86AB")
+    ws['A1'].alignment = center_alignment
+    
+    # Informations générales
+    current_row = 3
+    ws[f'A{current_row}'] = f"📅 Période: {start_date.strftime('%d/%m/%Y')} → {(start_date + timedelta(days=len(itinerary)-1)).strftime('%d/%m/%Y')}"
+    ws[f'A{current_row}'].font = subheader_font
+    current_row += 1
+    
+    ws[f'A{current_row}'] = f"🏃 {stats['total_days']} jour{'s' if stats['total_days'] > 1 else ''} / 0 nuitée • Pauses flexibles : déjeuner (13h00-14h30 ≤ 1h) & prière (14h00-15h00 ≤ 20 min)"
+    current_row += 2
+    
+    # En-têtes du tableau
+    headers = ['JOUR', 'HORAIRES', 'ACTIVITÉS', 'TRANSPORT', 'NUIT']
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=current_row, column=col, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center_alignment
+        cell.border = border
+    
+    current_row += 1
+    
+    # Données du planning
+    # L'itinéraire est une liste de tuples: (day, start_time, end_time, description)
+    current_day = None
+    day_start_row = current_row
+    
+    for event in itinerary:
+        day, start_time, end_time, description = event
+        
+        # Nouvelle journée
+        if day != current_day:
+            current_day = day
+            day_start_row = current_row
+            
+            # Colonne JOUR
+            ws.cell(row=current_row, column=1, value=f"JOUR {day}")
+            ws.cell(row=current_row, column=1).font = Font(bold=True)
+            ws.cell(row=current_row, column=1).alignment = center_alignment
+            ws.cell(row=current_row, column=1).border = border
+        else:
+            ws.cell(row=current_row, column=1, value="")
+            ws.cell(row=current_row, column=1).border = border
+        
+        # Colonne HORAIRES
+        if isinstance(start_time, str):
+            time_str = start_time
+        else:
+            time_str = f"{start_time.strftime('%Hh%M')}-{end_time.strftime('%Hh%M')}"
+        
+        ws.cell(row=current_row, column=2, value=time_str)
+        ws.cell(row=current_row, column=2).alignment = center_alignment
+        ws.cell(row=current_row, column=2).border = border
+        
+        # Colonne ACTIVITÉS
+        ws.cell(row=current_row, column=3, value=description)
+        
+        # Coloration selon le type d'activité
+        if "🚗" in description or "→" in description:
+            # Transport
+            pass  # Pas de coloration spéciale
+        elif "🍽️" in description or "Déjeuner" in description:
+            # Déjeuner
+            ws.cell(row=current_row, column=3).fill = PatternFill(start_color="E8F5E8", end_color="E8F5E8", fill_type="solid")
+        elif "🕌" in description or "Prière" in description:
+            # Prière
+            ws.cell(row=current_row, column=3).fill = PatternFill(start_color="E8F5E8", end_color="E8F5E8", fill_type="solid")
+        else:
+            # Activité normale
+            ws.cell(row=current_row, column=3).fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+        
+        ws.cell(row=current_row, column=3).border = border
+        
+        # Colonne TRANSPORT
+        import re
+        # Extraire distance et durée de la description
+        if "🚗" in description and "(" in description:
+            # Format: "🚗 Dakar → Saint-Louis (240.9 km, 0min)"
+            match = re.search(r"\(([\d\.]+)\s*km,\s*([^)]+)\)", description)
+            if match:
+                km = match.group(1)
+                duration = match.group(2).strip()
+                transport_text = f"~{km} km / ~{duration}"
+                ws.cell(row=current_row, column=4, value=transport_text)
+                ws.cell(row=current_row, column=4).font = Font(color="D32F2F")
+            else:
+                ws.cell(row=current_row, column=4, value="-")
+        else:
+            ws.cell(row=current_row, column=4, value="-")
+        
+        ws.cell(row=current_row, column=4).alignment = center_alignment
+        ws.cell(row=current_row, column=4).border = border
+        
+        # Colonne NUIT
+        ws.cell(row=current_row, column=5, value="")
+        ws.cell(row=current_row, column=5).fill = PatternFill(start_color="E3F2FD", end_color="E3F2FD", fill_type="solid")
+        ws.cell(row=current_row, column=5).border = border
+        
+        current_row += 1
+    
+    # Note en bas
+    current_row += 1
+    ws[f'A{current_row}'] = "ℹ️ Distances/temps indicatifs. Déjeuner (13h00-14h30, ≤1h) et prière (14h00-15h00, ≤20 min) sont flexibles et intégrés sans bloquer les activités."
+    ws[f'A{current_row}'].font = Font(size=9, italic=True)
+    ws.merge_cells(f'A{current_row}:E{current_row}')
+    
+    # Ajuster la largeur des colonnes
+    ws.column_dimensions['A'].width = 12
+    ws.column_dimensions['B'].width = 15
+    ws.column_dimensions['C'].width = 50
+    ws.column_dimensions['D'].width = 20
+    ws.column_dimensions['E'].width = 12
+    
+    # Sauvegarder dans un buffer
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    
+    return buffer.getvalue()
+
 # Test de connexion
 if st.sidebar.button("🔍 Tester connexion Maps"):
     with st.spinner("Test en cours..."):
@@ -1824,10 +2106,25 @@ if st.sidebar.button("🔍 Tester connexion Maps"):
         else:
             st.sidebar.error(f"❌ {message}")
 
+# Mention développeur
+st.sidebar.markdown("---")
+st.sidebar.caption("💻 Developed by @Moctar All rights reserved")
+
 # --------------------------
 # FORMULAIRE
 # --------------------------
 st.header("📍 Paramètres de la mission")
+
+# Champ pour le titre de mission personnalisé
+st.subheader("📝 Titre de la mission")
+mission_title = st.text_input(
+    "Titre personnalisé de votre mission",
+    value="Mission Terrain",
+    help="Ce titre apparaîtra dans la présentation professionnelle et tous les documents générés",
+    placeholder="Ex: Mission d'inspection technique, Visite commerciale, Audit de site..."
+)
+
+st.divider()
 
 tab1, tab2, tab3 = st.tabs(["Sites à visiter", "Horaires", "Options"])
 
@@ -1848,101 +2145,230 @@ with tab1:
     
     st.divider()
     
-    st.subheader("📍 Sites à visiter")
+    # En-tête optimisé avec informations contextuelles
+    col_header1, col_header2 = st.columns([3, 1])
+    with col_header1:
+        st.subheader("📍 Sites à visiter")
+    with col_header2:
+        # Affichage compact du statut et compteur sur la même ligne
+        if 'data_saved' in st.session_state and st.session_state.data_saved:
+            col_status, col_count = st.columns([1, 1])
+            with col_status:
+                st.success("✅ Sauvegardé")
+            with col_count:
+                st.metric("Sites", len(st.session_state.sites_df) if 'sites_df' in st.session_state else 0)
+    
+    # Message d'aide contextuel
+    if 'sites_df' not in st.session_state or len(st.session_state.sites_df) == 0:
+        st.info("💡 **Commencez par ajouter vos sites à visiter** - Utilisez le tableau ci-dessous pour saisir les villes, types d'activités et durées prévues.")
     
     if 'sites_df' not in st.session_state:
         if use_base_location:
             st.session_state.sites_df = pd.DataFrame([
                 {"Ville": "Thiès", "Type": "Client", "Activité": "Réunion commerciale", "Durée (h)": 2.0},
-                {"Ville": "Saint-Louis", "Type": "Site", "Activité": "Inspection", "Durée (h)": 3.0},
+                {"Ville": "Saint-Louis", "Type": "Sites technique", "Activité": "Inspection", "Durée (h)": 3.0},
             ])
         else:
             st.session_state.sites_df = pd.DataFrame([
                 {"Ville": "Dakar", "Type": "Agence", "Activité": "Brief", "Durée (h)": 0.5},
-                {"Ville": "Thiès", "Type": "Client", "Activité": "Réunion", "Durée (h)": 2.0},
+                {"Ville": "Thiès", "Type": "Sites technique", "Activité": "Visite", "Durée (h)": 2.0},
             ])
+    
+    # Gestion des types de sites personnalisés
+    if 'custom_site_types' not in st.session_state:
+        st.session_state.custom_site_types = []
+    
+    # Types de base + types personnalisés
+    base_types = ["Agence", "Client", "Sites technique", "Site BTS", "Partenaire", "Autre"]
+    all_types = base_types + st.session_state.custom_site_types
+    
+    # Tableau optimisé avec liste déroulante et saisie libre
+    st.markdown("**📋 Tableau des sites à visiter :**")
+    
+    # Ajouter une option "Autre (saisir)" pour permettre la saisie libre
+    dropdown_options = all_types + ["✏️ Autre (saisir)"]
     
     sites_df = st.data_editor(
         st.session_state.sites_df, 
         num_rows="dynamic", 
         use_container_width=True,
         key="sites_data_editor",
+        height=300,  # Hauteur fixe pour une meilleure lisibilité
         column_config={
-            "Ville": st.column_config.TextColumn("Ville", required=True),
-            "Type": st.column_config.SelectboxColumn(
-                "Type",
-                options=["Agence", "Client", "Site", "Partenaire", "Autre"],
-                default="Site"
+            "Ville": st.column_config.TextColumn(
+                "🏙️ Ville", 
+                required=True,
+                help="Nom de la ville ou localité à visiter",
+                width="medium"
             ),
-            "Activité": st.column_config.TextColumn("Activité", default="Visite"),
+            "Type": st.column_config.SelectboxColumn(
+                "🏢 Type",
+                options=dropdown_options,
+                default="Sites technique",
+                help="Sélectionnez un type ou choisissez 'Autre (saisir)' pour créer un nouveau type",
+                width="medium"
+            ),
+            "Activité": st.column_config.TextColumn(
+                "⚡ Activité", 
+                default="Visite",
+                help="Nature de l'activité prévue",
+                width="medium"
+            ),
             "Durée (h)": st.column_config.NumberColumn(
-                "Durée (h)",
+                "⏱️ Durée (h)",
                 min_value=0.25,
                 max_value=24,
                 step=0.25,
                 format="%.2f",
-                default=1.0
+                default=1.0,
+                help="Durée estimée en heures",
+                width="small"
+            ),
+            "Peut continuer": st.column_config.CheckboxColumn(
+                "🔄 Peut continuer",
+                default=False,
+                help="Cochez si cette activité peut être reportée au jour suivant si elle dépasse les heures d'activité",
+                width="small"
             )
-        }
+        },
+        column_order=["Ville", "Type", "Activité", "Durée (h)", "Peut continuer"]
     )
-    st.session_state.sites_df = sites_df
+    
+    # Interface pour saisir un nouveau type si "Autre (saisir)" est sélectionné
+    if sites_df is not None and not sites_df.empty:
+        # Vérifier s'il y a des lignes avec "✏️ Autre (saisir)"
+        custom_rows = sites_df[sites_df['Type'] == "✏️ Autre (saisir)"]
+        if not custom_rows.empty:
+            st.info("💡 **Nouveau type détecté** - Veuillez spécifier le type personnalisé ci-dessous :")
+            
+            for idx in custom_rows.index:
+                col1, col2, col3 = st.columns([2, 3, 1])
+                with col1:
+                    st.write(f"**Ligne {idx + 1}** - {sites_df.loc[idx, 'Ville']}")
+                with col2:
+                    new_custom_type = st.text_input(
+                        f"Type personnalisé pour la ligne {idx + 1}",
+                        placeholder="Ex: Site industriel, Centre de données...",
+                        key=f"custom_type_{idx}",
+                        label_visibility="collapsed"
+                    )
+                with col3:
+                    if st.button("✅", key=f"apply_{idx}", help="Appliquer ce type"):
+                        if new_custom_type and new_custom_type.strip():
+                            # Ajouter le nouveau type à la liste des types personnalisés
+                            if new_custom_type.strip() not in st.session_state.custom_site_types:
+                                st.session_state.custom_site_types.append(new_custom_type.strip())
+                            
+                            # Mettre à jour la ligne dans le DataFrame
+                            sites_df.loc[idx, 'Type'] = new_custom_type.strip()
+                            st.session_state.sites_df = sites_df
+                            # Pas de rerun automatique pour éviter de ralentir la saisie
+    
+    # Bouton d'enregistrement
+    col1, col2, col3 = st.columns([2, 1, 2])
+    with col2:
+        if st.button("💾 Enregistrer", use_container_width=True, type="primary"):
+            st.session_state.sites_df = sites_df
+            st.session_state.data_saved = True  # Marquer comme sauvegardé
+            st.rerun()  # Rafraîchir pour afficher le statut en haut
+    
+    # Pas d'enregistrement automatique - seulement lors du clic sur Enregistrer ou Planifier
+    # st.session_state.sites_df = sites_df
     
     # Option d'ordre des sites
-    st.subheader("🔄 Ordre des sites")
-    order_mode = st.radio(
-        "Mode d'ordonnancement",
-        ["🤖 Automatique (optimisé)", "✋ Manuel (personnalisé)"],
-        horizontal=True,
-        help="Automatique: optimise l'ordre pour minimiser les distances. Manuel: vous choisissez l'ordre."
-    )
-    
-    if order_mode == "✋ Manuel (personnalisé)":
-        st.info("💡 Réorganisez les sites en les faisant glisser dans l'ordre souhaité")
+    if len(sites_df) > 1:  # Afficher seulement s'il y a plus d'un site
+        st.subheader("🔄 Ordre des visites")
+        order_mode = st.radio(
+            "Mode d'ordonnancement",
+            ["🤖 Automatique (optimisé)", "✋ Manuel (personnalisé)"],
+            horizontal=True,
+            help="Automatique: optimise l'ordre pour minimiser les distances. Manuel: vous choisissez l'ordre."
+        )
         
-        # Créer une liste ordonnée des sites pour réorganisation
-        if 'manual_order' not in st.session_state or len(st.session_state.manual_order) != len(sites_df):
-            st.session_state.manual_order = list(range(len(sites_df)))
-        
-        # Interface de réorganisation manuelle
-        st.markdown("**Ordre actuel des sites :**")
-        
-        # Afficher l'ordre actuel avec possibilité de modification
-        for i, idx in enumerate(st.session_state.manual_order):
-            if idx < len(sites_df):
-                site = sites_df.iloc[idx]
-                col1, col2, col3, col4 = st.columns([1, 3, 2, 1])
+        if order_mode == "✋ Manuel (personnalisé)":
+            with st.container():
+                st.info("💡 **Astuce :** Utilisez les flèches pour réorganiser vos sites dans l'ordre de visite souhaité")
                 
+                # Créer une liste ordonnée des sites pour réorganisation
+                if 'manual_order' not in st.session_state or len(st.session_state.manual_order) != len(sites_df):
+                    st.session_state.manual_order = list(range(len(sites_df)))
+                
+                # Interface de réorganisation manuelle améliorée
+                st.markdown("**📋 Ordre de visite des sites :**")
+                
+                # Conteneur avec style pour la liste
+                with st.container():
+                    for i, idx in enumerate(st.session_state.manual_order):
+                        if idx < len(sites_df):
+                            site = sites_df.iloc[idx]
+                            
+                            # Créer une ligne avec un style visuel amélioré
+                            col1, col2, col3, col4, col5 = st.columns([0.8, 2.5, 2, 1, 1])
+                            
+                            with col1:
+                                st.markdown(f"**`{i+1}`**")
+                            with col2:
+                                st.markdown(f"📍 **{site['Ville']}**")
+                            with col3:
+                                st.markdown(f"🏢 {site['Type']}")
+                            with col4:
+                                st.markdown(f"⏱️ {site['Durée (h)']}h")
+                            with col5:
+                                # Boutons de réorganisation dans une ligne
+                                subcol1, subcol2 = st.columns(2)
+                                with subcol1:
+                                    if i > 0:
+                                        if st.button("⬆️", key=f"up_{i}", help="Monter", use_container_width=True):
+                                            st.session_state.manual_order[i], st.session_state.manual_order[i-1] = \
+                                                st.session_state.manual_order[i-1], st.session_state.manual_order[i]
+                                            st.rerun()
+                                with subcol2:
+                                    if i < len(st.session_state.manual_order) - 1:
+                                        if st.button("⬇️", key=f"down_{i}", help="Descendre", use_container_width=True):
+                                            st.session_state.manual_order[i], st.session_state.manual_order[i+1] = \
+                                                st.session_state.manual_order[i+1], st.session_state.manual_order[i]
+                                            st.rerun()
+                            
+                            # Séparateur visuel entre les éléments
+                            if i < len(st.session_state.manual_order) - 1:
+                                st.markdown("---")
+                
+                # Boutons d'action
+                col1, col2, col3 = st.columns([1, 1, 2])
                 with col1:
-                    st.write(f"**{i+1}.**")
+                    if st.button("🔄 Réinitialiser", help="Remettre l'ordre original", use_container_width=True):
+                        st.session_state.manual_order = list(range(len(sites_df)))
+                        st.rerun()
                 with col2:
-                    st.write(f"📍 {site['Ville']}")
-                with col3:
-                    st.write(f"{site['Type']} - {site['Activité']}")
-                with col4:
-                    if i > 0:
-                        if st.button("⬆️", key=f"up_{i}", help="Monter"):
-                            # Échanger avec l'élément précédent
-                            st.session_state.manual_order[i], st.session_state.manual_order[i-1] = \
-                                st.session_state.manual_order[i-1], st.session_state.manual_order[i]
-                            st.rerun()
-                    if i < len(st.session_state.manual_order) - 1:
-                        if st.button("⬇️", key=f"down_{i}", help="Descendre"):
-                            # Échanger avec l'élément suivant
-                            st.session_state.manual_order[i], st.session_state.manual_order[i+1] = \
-                                st.session_state.manual_order[i+1], st.session_state.manual_order[i]
-                            st.rerun()
-        
-        # Bouton pour réinitialiser l'ordre
-        if st.button("🔄 Réinitialiser l'ordre", help="Remettre l'ordre original"):
-            st.session_state.manual_order = list(range(len(sites_df)))
-            st.rerun()
+                    if st.button("🔀 Mélanger", help="Ordre aléatoire", use_container_width=True):
+                        import random
+                        random.shuffle(st.session_state.manual_order)
+                        st.rerun()
+        else:
+            st.success("🤖 **Mode automatique activé** - L'ordre des sites sera optimisé automatiquement pour minimiser les temps de trajet")
+    else:
+        st.info("ℹ️ Ajoutez au moins 2 sites pour configurer l'ordre de visite")
 
 with tab2:
-    col1, col2 = st.columns(2)
+    col1, col2 = st.columns([1, 2])  # Réduire la largeur de la colonne Dates
     with col1:
         st.subheader("📅 Dates")
         start_date = st.date_input("Date de début", value=datetime.today().date())
-        max_days = st.number_input("Nombre de jours max", min_value=0, value=0, step=1)
+        max_days = st.number_input("Nombre de jours max (Laisser zéro pour calcul automatique)", min_value=0, value=0, step=1, help="Laisser zéro pour calcul automatique")
+        
+        st.divider()
+        
+        # Ajouter des informations utiles dans la section Dates
+        st.markdown("**📊 Informations**")
+        if start_date:
+            # Jour de la semaine avec date complète
+            weekdays = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+            months = ["janvier", "février", "mars", "avril", "mai", "juin", 
+                     "juillet", "août", "septembre", "octobre", "novembre", "décembre"]
+            start_weekday = weekdays[start_date.weekday()]
+            start_month = months[start_date.month - 1]
+            formatted_date = f"{start_weekday.lower()} {start_date.day} {start_month} {start_date.year}"
+            st.info(f"🗓️ Jour de début : {formatted_date}")
     
     with col2:
         st.subheader("⏰ Horaires")
@@ -1962,6 +2388,27 @@ with tab2:
             start_travel_time = st.time_input("Début voyages", value=time(7, 30))
         with col_travel2:
             end_travel_time = st.time_input("Fin voyages", value=time(19, 0))
+        
+        st.divider()
+        
+        # Gestion des activités longues
+        st.markdown("**Gestion des activités longues**")
+        col_tol1, col_tol2 = st.columns(2)
+        with col_tol1:
+            tolerance_hours = st.number_input(
+                "Seuil de tolérance (heures)", 
+                min_value=0.0, 
+                max_value=3.0, 
+                value=1.0, 
+                step=0.25,
+                help="Activités se terminant dans ce délai après la fin des heures d'activité peuvent continuer le même jour"
+            )
+        with col_tol2:
+            default_can_continue = st.checkbox(
+                "Une partie d’une activité non achevée à l’heure de la descente pourra être poursuivie le lendemain", 
+                value=False,
+                help="Non poursuite cochée par défaut"
+            )
         
         # Maintenir la compatibilité avec l'ancien code
         start_day_time = start_activity_time
@@ -1995,95 +2442,295 @@ with col2:
     plan_button = st.button("🚀 Planifier la mission", type="primary", use_container_width=True)
 
 if plan_button:
-    with st.spinner("Planification en cours..."):
-        rows = sites_df.replace({pd.NA: None}).to_dict(orient="records")
-        sites = [r for r in rows if r.get("Ville") and str(r["Ville"]).strip()]
+    # Sauvegarde automatique des données avant planification
+    st.session_state.sites_df = sites_df
+    
+    # Animation CSS moderne pour l'attente
+    st.markdown("""
+    <style>
+    .planning-container {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border-radius: 15px;
+        padding: 30px;
+        margin: 20px 0;
+        text-align: center;
+        color: white;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+    }
+    
+    .spinner-icon {
+        font-size: 3em;
+        animation: spin 2s linear infinite;
+        margin-bottom: 20px;
+        display: inline-block;
+    }
+    
+    @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+    
+    .pulse-text {
+        animation: pulse 1.5s ease-in-out infinite alternate;
+        font-size: 1.2em;
+        font-weight: bold;
+        margin: 10px 0;
+    }
+    
+    @keyframes pulse {
+        0% { opacity: 0.6; }
+        100% { opacity: 1; }
+    }
+    
+    .progress-enhanced {
+        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        border-radius: 15px;
+        overflow: hidden;
+        margin: 20px 0;
+        height: 8px;
+        position: relative;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+    }
+    
+    .progress-enhanced::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: -100%;
+        width: 100%;
+        height: 100%;
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent);
+        animation: shimmer 2s infinite;
+    }
+    
+    @keyframes shimmer {
+        0% { left: -100%; }
+        100% { left: 100%; }
+    }
+    
+    .step-indicator {
+        display: flex;
+        justify-content: space-between;
+        margin: 20px 0;
+        font-size: 0.9em;
+        position: relative;
+    }
+    
+    .step-indicator::before {
+        content: '';
+        position: absolute;
+        top: 50%;
+        left: 0;
+        right: 0;
+        height: 2px;
+        background: linear-gradient(90deg, rgba(255,255,255,0.3) 0%, rgba(255,255,255,0.6) 50%, rgba(255,255,255,0.3) 100%);
+        z-index: 1;
+        transform: translateY(-50%);
+    }
+    
+    .step {
+        padding: 8px 15px;
+        border-radius: 20px;
+        background: rgba(255,255,255,0.15);
+        transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        position: relative;
+        z-index: 2;
+        border: 2px solid transparent;
+        backdrop-filter: blur(10px);
+        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+    }
+    
+    .step.active {
+        background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+        transform: scale(1.15);
+        color: white;
+        border: 2px solid rgba(255,255,255,0.5);
+        box-shadow: 0 8px 25px rgba(79, 172, 254, 0.4);
+        animation: glow 2s ease-in-out infinite alternate;
+    }
+    
+    .step.completed {
+        background: linear-gradient(135deg, #56ab2f 0%, #a8e6cf 100%);
+        color: white;
+        border: 2px solid rgba(255,255,255,0.3);
+        box-shadow: 0 4px 15px rgba(86, 171, 47, 0.3);
+    }
+    
+    @keyframes glow {
+        0% { box-shadow: 0 8px 25px rgba(79, 172, 254, 0.4); }
+        100% { box-shadow: 0 12px 35px rgba(79, 172, 254, 0.6); }
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Container d'animation
+    animation_container = st.empty()
+    
+    with animation_container.container():
+        st.markdown("""
+        <div class="planning-container">
+            <div class="spinner-icon">🗺️</div>
+            <div class="pulse-text">Planification intelligente en cours...</div>
+            <div class="step-indicator">
+                <span class="step active" id="step-1">📍 Géocodage</span>
+                <span class="step" id="step-2">🗺️ Distances</span>
+                <span class="step" id="step-3">🔄 Optimisation</span>
+                <span class="step" id="step-4">🛣️ Itinéraire</span>
+                <span class="step" id="step-5">📅 Planning</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    rows = sites_df.replace({pd.NA: None}).to_dict(orient="records")
+    sites = [r for r in rows if r.get("Ville") and str(r["Ville"]).strip()]
+    
+    if use_base_location and base_location and base_location.strip():
+        base_site = {"Ville": base_location.strip(), "Type": "Base", "Activité": "Départ", "Durée (h)": 0}
+        return_site = {"Ville": base_location.strip(), "Type": "Base", "Activité": "Retour", "Durée (h)": 0}
+        all_sites = [base_site] + sites + [return_site]
         
-        if use_base_location and base_location and base_location.strip():
-            base_site = {"Ville": base_location.strip(), "Type": "Base", "Activité": "Départ", "Durée (h)": 0}
-            return_site = {"Ville": base_location.strip(), "Type": "Base", "Activité": "Retour", "Durée (h)": 0}
-            all_sites = [base_site] + sites + [return_site]
-            
-            if len(sites) < 1:
-                st.error("❌ Ajoutez au moins 1 site à visiter")
-                st.stop()
-        else:
-            all_sites = sites
-            if len(all_sites) < 2:
-                st.error("❌ Ajoutez au moins 2 sites")
-                st.stop()
-            first_site = all_sites[0].copy()
-            first_site["Activité"] = "Retour"
-            all_sites = all_sites + [first_site]
-        
-        progress = st.progress(0)
-        status = st.empty()
-        
-        status.text("📍 Géocodage...")
-        coords = []
-        failed = []
-        
-        for i, s in enumerate(all_sites):
-            progress.progress((i+1) / (len(all_sites) * 4))
-            coord = geocode_city_senegal(s["Ville"], use_cache)
-            if not coord:
-                failed.append(s["Ville"])
-            else:
-                coords.append(coord)
-        
-        if failed:
-            st.error(f"❌ Villes introuvables: {', '.join(failed)}")
+        if len(sites) < 1:
+            st.error("❌ Ajoutez au moins 1 site à visiter")
             st.stop()
+    else:
+        all_sites = sites
+        if len(all_sites) < 2:
+            st.error("❌ Ajoutez au moins 2 sites")
+            st.stop()
+        first_site = all_sites[0].copy()
+        first_site["Activité"] = "Retour"
+        all_sites = all_sites + [first_site]
+    
+    progress = st.progress(0)
+    status = st.empty()
+    
+    # Fonction pour mettre à jour l'animation avec JavaScript
+    def update_animation_step(step_number, icon, message, completed_steps=None):
+        if completed_steps is None:
+            completed_steps = []
         
-        status.text("🗺️ Calcul des distances...")
-        progress.progress(0.4)
-        
-        durations_sec = None
-        distances_m = None
-        calculation_method = ""
-        city_list = [s["Ville"] for s in all_sites]
-        
-        if distance_method == "Maps uniquement":
-            durations_sec, distances_m, error_msg = improved_graphhopper_duration_matrix(graphhopper_api_key, coords)
-            calculation_method = "Maps"
-            if durations_sec is None:
-                st.error(f"❌ {error_msg}")
-                st.stop()
-        
-        elif distance_method == "Automatique uniquement":
-            result, error_msg = improved_deepseek_estimate_matrix(city_list, deepseek_api_key, debug_mode)
-            if result:
-                durations_sec, distances_m = result
-                calculation_method = "Automatique IA"
+        def get_step_class(step_num):
+            if step_num in completed_steps:
+                return 'completed'
+            elif step_num == step_number:
+                return 'active'
             else:
-                st.error(f"❌ {error_msg}")
-                st.stop()
+                return ''
         
-        elif distance_method == "Géométrique uniquement":
+        animation_container.markdown(f"""
+        <div class="planning-container">
+            <div class="spinner-icon">{icon}</div>
+            <div class="pulse-text">{message}</div>
+            <div class="step-indicator">
+                <span class="step {get_step_class(1)}" id="step-1">📍 Géocodage</span>
+                <span class="step {get_step_class(2)}" id="step-2">🗺️ Distances</span>
+                <span class="step {get_step_class(3)}" id="step-3">🔄 Optimisation</span>
+                <span class="step {get_step_class(4)}" id="step-4">🛣️ Itinéraire</span>
+                <span class="step {get_step_class(5)}" id="step-5">📅 Planning</span>
+            </div>
+            <div class="progress-enhanced"></div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Messages dynamiques pour chaque étape
+    geocoding_messages = [
+        "🔍 Recherche des coordonnées GPS...",
+        "📍 Géolocalisation des sites en cours...",
+        "🌍 Validation des adresses...",
+        "✅ Géocodage terminé avec succès!"
+    ]
+    
+    # Étape 1: Géocodage
+    update_animation_step(1, "📍", geocoding_messages[0], [])
+    status.text("📍 Géocodage...")
+    coords = []
+    failed = []
+    
+    for i, s in enumerate(all_sites):
+        progress.progress((i+1) / (len(all_sites) * 4))
+        # Message dynamique pendant le géocodage
+        if i < len(geocoding_messages) - 1:
+            update_animation_step(1, "📍", geocoding_messages[min(i, len(geocoding_messages)-2)], [])
+        coord = geocode_city_senegal(s["Ville"], use_cache)
+        if not coord:
+            failed.append(s["Ville"])
+        else:
+            coords.append(coord)
+    
+    update_animation_step(1, "✅", geocoding_messages[-1], [1])
+    
+    if failed:
+        st.error(f"❌ Villes introuvables: {', '.join(failed)}")
+        st.stop()
+    
+    # Étape 2: Calcul des distances
+    distance_messages = [
+        "🗺️ Connexion aux services de cartographie...",
+        "📏 Calcul des distances entre les sites...",
+        "⏱️ Estimation des temps de trajet...",
+        "✅ Matrice de distances calculée!"
+    ]
+    
+    update_animation_step(2, "🗺️", distance_messages[0], [1])
+    status.text("🗺️ Calcul des distances...")
+    progress.progress(0.4)
+    
+    durations_sec = None
+    distances_m = None
+    calculation_method = ""
+    city_list = [s["Ville"] for s in all_sites]
+    
+    if distance_method == "Maps uniquement":
+        update_animation_step(2, "🗺️", distance_messages[1], [1])
+        durations_sec, distances_m, error_msg = improved_graphhopper_duration_matrix(graphhopper_api_key, coords)
+        calculation_method = "Maps"
+        if durations_sec is None:
+            st.error(f"❌ {error_msg}")
+            st.stop()
+        else:
+            # Debug: Vérifier que les durées sont bien reçues
+            if debug_mode:
+                st.info(f"🔍 Debug Maps: {len(durations_sec)} x {len(durations_sec[0]) if durations_sec else 0} matrice de durées reçue")
+                if durations_sec and len(durations_sec) > 0:
+                    sample_duration = durations_sec[0][1] if len(durations_sec[0]) > 1 else 0
+                    st.info(f"🔍 Debug Maps: Exemple durée [0][1] = {sample_duration} secondes ({sample_duration/3600:.2f}h)")
+    
+    elif distance_method == "Automatique uniquement":
+        result, error_msg = improved_deepseek_estimate_matrix(city_list, deepseek_api_key, debug_mode)
+        if result:
+            durations_sec, distances_m = result
+            calculation_method = "Automatique"
+        else:
+            st.error(f"❌ {error_msg}")
+            st.stop()
+    
+    elif distance_method == "Géométrique uniquement":
+        durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
+        calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
+    
+    else:
+        # Mode Auto
+        durations_sec, distances_m, error_msg = improved_graphhopper_duration_matrix(graphhopper_api_key, coords)
+        
+        if durations_sec is not None:
+            calculation_method = "Maps"
+        else:
+            if use_deepseek_fallback and deepseek_api_key:
+                result, _ = improved_deepseek_estimate_matrix(city_list, deepseek_api_key, debug_mode)
+                if result:
+                    durations_sec, distances_m = result
+                    calculation_method = "Automatique"
+
+        if durations_sec is None:
             durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
             calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
-        
-        else:
-            # Mode Auto
-            durations_sec, distances_m, error_msg = improved_graphhopper_duration_matrix(graphhopper_api_key, coords)
-            
-            if durations_sec is not None:
-                calculation_method = "Maps"
-            else:
-                if use_deepseek_fallback and deepseek_api_key:
-                    result, _ = improved_deepseek_estimate_matrix(city_list, deepseek_api_key, debug_mode)
-                    if result:
-                        durations_sec, distances_m = result
-                        calculation_method = "Automatique IA"
-
-                if durations_sec is None:
-                    durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
-                    calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
         
         method_color = "success" if "Maps" in calculation_method else "info" if "Automatique" in calculation_method else "warning"
         getattr(st, method_color)(f"📊 Méthode: {calculation_method}")
         
-        status.text("🔄 Optimisation...")
+        # Étape 3: Optimisation
+        update_animation_step(3, "🔄", "Optimisation de l'itinéraire...", [1, 2])
+        status.text("🔄 Optimisation de l'ordre des sites...")
         progress.progress(0.6)
         
         # Déterminer l'ordre des sites selon le mode choisi
@@ -2108,14 +2755,39 @@ if plan_button:
             
             st.success("✅ Ordre manuel appliqué")
         else:
-            # Utiliser l'optimisation automatique (TSP)
-            order = solve_tsp_fixed_start_end(durations_sec) if len(coords) >= 3 else list(range(len(coords)))
-            st.success("✅ Ordre optimisé automatiquement")
+            # Utiliser l'optimisation IA au lieu du TSP traditionnel
+            if len(coords) >= 3:
+                # Essayer d'abord l'optimisation IA
+                ai_order, ai_success, ai_message = optimize_route_with_ai(
+                    all_sites, coords, 
+                    base_location if use_base_location else None, 
+                    deepseek_api_key
+                )
+                
+                if ai_success:
+                    order = ai_order
+                    st.success(f"✅ Ordre optimisé par IA: {ai_message}")
+                else:
+                    # Fallback vers TSP si l'IA échoue
+                    order = solve_tsp_fixed_start_end(durations_sec)
+                    st.warning(f"⚠️ IA échouée ({ai_message}), utilisation TSP classique")
+            else:
+                order = list(range(len(coords)))
+                st.success("✅ Ordre séquentiel (moins de 3 sites)")
+                
+            if debug_mode and durations_sec:
+                # Calculer coût total pour transparence
+                total_cost = sum(durations_sec[order[i]][order[i+1]] for i in range(len(order)-1))
+                st.info(f"🔍 Debug Optimisation: ordre={order} | coût total={total_cost/3600:.2f}h")
         
-        status.text("🛣️ Calcul itinéraire...")
+        status.text("🛣️ Calcul de l'itinéraire détaillé...")
+        # Étape 4: Génération de l'itinéraire
+        update_animation_step(4, "🛣️", "Génération de l'itinéraire détaillé...", [1, 2, 3])
         progress.progress(0.8)
         
         segments = []
+        zero_segments_indices = []
+        
         for i in range(len(order)-1):
             from_idx = order[i]
             to_idx = order[i+1]
@@ -2123,6 +2795,44 @@ if plan_button:
             if from_idx < len(durations_sec) and to_idx < len(durations_sec[0]):
                 duration = durations_sec[from_idx][to_idx]
                 distance = distances_m[from_idx][to_idx] if distances_m else 0
+                
+                # Si la distance/durée est nulle, calculer avec la géométrie
+                if duration == 0 or distance == 0:
+                    from math import radians, sin, cos, sqrt, atan2
+                    
+                    def haversine_single(lon1, lat1, lon2, lat2):
+                        R = 6371.0
+                        dlon = radians(lon2 - lon1)
+                        dlat = radians(lat2 - lat1)
+                        a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
+                        c = 2 * atan2(sqrt(a), sqrt(1-a))
+                        return R * c
+                    
+                    # Calculer la distance géométrique
+                    coord_from = coords[from_idx]
+                    coord_to = coords[to_idx]
+                    geometric_km = haversine_single(coord_from[0], coord_from[1], coord_to[0], coord_to[1])
+                    geometric_km *= 1.2  # Facteur de correction pour les routes
+                    
+                    # Si la distance était nulle, la calculer
+                    if distance == 0:
+                        distance = int(geometric_km * 1000)
+                    
+                    # Si SEULEMENT la durée était nulle, la calculer en gardant la distance trouvée
+                    if duration == 0:
+                        # Utiliser la distance réelle si elle existe, sinon la distance géométrique
+                        distance_for_time_calc = distance / 1000 if distance > 0 else geometric_km
+                        geometric_hours = distance_for_time_calc / default_speed_kmh
+                        duration = int(geometric_hours * 3600)
+                    
+                    zero_segments_indices.append(i)
+                    
+                    if debug_mode:
+                        st.info(f"🔍 Segment {i} recalculé géométriquement: {geometric_km:.1f}km, {duration/3600:.2f}h")
+                
+                # Debug: Afficher les valeurs des segments
+                if debug_mode:
+                    st.info(f"🔍 Debug Segment {i}: de {from_idx} vers {to_idx} = {duration}s ({duration/3600:.2f}h), {distance/1000:.1f}km")
                 
                 segments.append({
                     "distance": distance,
@@ -2135,11 +2845,18 @@ if plan_button:
             st.error("❌ AUCUN segment créé!")
             st.stop()
         
-        zero_segments = [i for i, s in enumerate(segments) if s['duration'] == 0]
-        if zero_segments:
-            st.warning(f"⚠️ {len(zero_segments)} segments avec durée estimée à 1h par défaut")
+        # Afficher les segments recalculés géométriquement
+        if zero_segments_indices:
+            st.success(f"✅ {len(zero_segments_indices)} segment(s) recalculé(s) avec la distance géométrique")
         
-        status.text("📅 Génération du planning...")
+        # Vérifier s'il reste des segments à zéro après le recalcul géométrique
+        remaining_zero_segments = [i for i, s in enumerate(segments) if s['duration'] == 0]
+        if remaining_zero_segments:
+            st.warning(f"⚠️ {len(remaining_zero_segments)} segments avec durée estimée à 1h par défaut")
+        
+        status.text("📅 Génération du planning détaillé...")
+        # Étape 5: Génération du planning
+        update_animation_step(5, "📅", "Finalisation du planning...", [1, 2, 3, 4])
         progress.progress(0.9)
         
         itinerary, sites_ordered, coords_ordered, stats = schedule_itinerary(
@@ -2158,7 +2875,8 @@ if plan_button:
             use_prayer=use_prayer,
             prayer_start_time=prayer_start_time if use_prayer else time(14,0),
             prayer_duration_min=prayer_duration_min if use_prayer else 20,
-            max_days=max_days
+            max_days=max_days,
+            tolerance_hours=tolerance_hours
         )
         
         progress.progress(1.0)
@@ -2172,7 +2890,11 @@ if plan_button:
             'stats': stats,
             'start_date': start_date,
             'calculation_method': calculation_method,
-            'segments_summary': segments
+            'segments_summary': segments,
+            'original_order': order.copy(),  # Sauvegarder l'ordre original
+            'durations_matrix': durations_sec,
+            'distances_matrix': distances_m,
+            'all_coords': coords
         }
         st.session_state.manual_itinerary = None
         st.session_state.edit_mode = False
@@ -2205,7 +2927,7 @@ if st.session_state.planning_results:
     with col4:
         st.metric("Temps de visite", f"{stats['total_visit_hours']:.1f} h")
     
-    tab_planning, tab_edit, tab_map, tab_export = st.tabs(["📅 Planning", "✏️ Éditer", "🗺️ Carte", "💾 Export"])
+    tab_planning, tab_edit, tab_manual, tab_map, tab_export = st.tabs(["📅 Planning", "✏️ Éditer", "🔄 Modifier ordre", "🗺️ Carte", "💾 Export"])
     
     with tab_planning:
         st.subheader("Planning détaillé")
@@ -2213,19 +2935,42 @@ if st.session_state.planning_results:
         view_mode = st.radio(
             "Mode d'affichage",
             ["📋 Vue interactive", "🎨 Présentation professionnelle"],
-            horizontal=True
+            horizontal=True,
+            index=1
         )
         
         if view_mode == "🎨 Présentation professionnelle":
             html_str = build_professional_html(itinerary, start_date, stats, sites_ordered, segments_summary, default_speed_kmh)
             st.components.v1.html(html_str, height=800, scrolling=True)
             
-            st.download_button(
-                label="📥 Télécharger HTML",
-                data=html_str,
-                file_name=f"mission_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
-                mime="text/html"
-            )
+            col_html, col_pdf = st.columns(2)
+            
+            with col_html:
+                st.download_button(
+                    label="📥 Télécharger HTML",
+                    data=html_str,
+                    file_name=f"mission_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
+                    mime="text/html"
+                )
+            
+            with col_pdf:
+                try:
+                    excel_data = create_mission_excel(
+                        itinerary=itinerary,
+                        start_date=start_date,
+                        stats=stats,
+                        sites_ordered=sites_ordered,
+                        segments_summary=segments_summary,
+                        mission_title=mission_title
+                    )
+                    st.download_button(
+                        label="📊 Télécharger Excel",
+                        data=excel_data,
+                        file_name=f"mission_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                except Exception as e:
+                    st.error(f"❌ Erreur lors de la génération du fichier Excel: {str(e)}")
         
         else:
             total_days = max(ev[0] for ev in itinerary) if itinerary else 1
@@ -2404,6 +3149,156 @@ if st.session_state.planning_results:
                 st.success("Statistiques recalculées!")
                 st.rerun()
     
+    with tab_manual:
+        st.subheader("🔄 Modification manuelle de l'ordre des sites")
+        
+        st.info("💡 Réorganisez l'ordre des sites en les faisant glisser. L'itinéraire sera automatiquement recalculé.")
+        
+        # Vérifier que nous avons les données nécessaires
+        if 'original_order' not in results or 'durations_matrix' not in results:
+            st.warning("⚠️ Données insuffisantes pour la modification manuelle. Veuillez relancer le calcul.")
+        else:
+            # Récupérer les données
+            original_order = results['original_order']
+            durations_matrix = results['durations_matrix']
+            distances_matrix = results['distances_matrix']
+            all_coords = results['all_coords']
+            
+            # Créer une liste des sites avec leur ordre actuel
+            if 'manual_order' not in st.session_state:
+                st.session_state.manual_order = original_order.copy()
+            
+            # Afficher l'ordre actuel des sites
+            st.markdown("**Ordre actuel des sites :**")
+            st.info(f"📊 **{len(st.session_state.manual_order)} sites** dans l'ordre actuel")
+            
+            # Interface pour réorganiser les sites avec conteneur scrollable
+            with st.container():
+                # Utiliser des boutons pour déplacer les sites
+                for i, site_idx in enumerate(st.session_state.manual_order):
+                    # Vérifier que l'index est valide
+                    if site_idx < len(sites_ordered):
+                        site = sites_ordered[site_idx]
+                        
+                        col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
+                        
+                        with col1:
+                            st.write(f"**{i+1}.** {site['Ville']} - {site.get('Type', 'Site')} - {site.get('Activité', 'Activité')}")
+                        
+                        with col2:
+                            if i > 0 and st.button("⬆️", key=f"up_{i}", help="Monter"):
+                                # Échanger avec l'élément précédent
+                                st.session_state.manual_order[i], st.session_state.manual_order[i-1] = \
+                                    st.session_state.manual_order[i-1], st.session_state.manual_order[i]
+                                st.rerun()
+                        
+                        with col3:
+                            if i < len(st.session_state.manual_order) - 1 and st.button("⬇️", key=f"down_{i}", help="Descendre"):
+                                # Échanger avec l'élément suivant
+                                st.session_state.manual_order[i], st.session_state.manual_order[i+1] = \
+                                    st.session_state.manual_order[i+1], st.session_state.manual_order[i]
+                                st.rerun()
+                        
+                        with col4:
+                            if i != 0 and i != len(st.session_state.manual_order) - 1:  # Ne pas permettre de supprimer le départ et l'arrivée
+                                if st.button("🗑️", key=f"remove_{i}", help="Supprimer"):
+                                    st.session_state.manual_order.pop(i)
+                                    st.rerun()
+                    else:
+                        # Index invalide - nettoyer
+                        st.warning(f"⚠️ Index invalide détecté ({site_idx}), nettoyage en cours...")
+                        st.session_state.manual_order = [idx for idx in st.session_state.manual_order if idx < len(sites_ordered)]
+                        st.rerun()
+            
+            st.markdown("---")
+            
+            # Boutons d'action
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                if st.button("🔄 Recalculer l'itinéraire", use_container_width=True):
+                    # Recalculer l'itinéraire avec le nouvel ordre
+                    new_order = st.session_state.manual_order
+                    
+                    # Recalculer les segments
+                    new_segments = []
+                    for i in range(len(new_order)-1):
+                        from_idx = new_order[i]
+                        to_idx = new_order[i+1]
+                        
+                        if from_idx < len(durations_matrix) and to_idx < len(durations_matrix[0]):
+                            duration = durations_matrix[from_idx][to_idx]
+                            distance = distances_matrix[from_idx][to_idx] if distances_matrix else 0
+                            
+                            new_segments.append({
+                                "distance": distance,
+                                "duration": duration
+                            })
+                        else:
+                            new_segments.append({"distance": 0, "duration": 0})
+                    
+                    # Recalculer l'itinéraire complet
+                    new_sites = [sites_ordered[i] for i in new_order]
+                    new_coords = [coords_ordered[i] for i in new_order]
+                    new_itinerary, new_sites_ordered, new_coords_ordered, new_stats = schedule_itinerary(
+                        coords=new_coords,
+                        sites=new_sites,
+                        order=list(range(len(new_order))),  # Ordre séquentiel car sites déjà réorganisés
+                        segments_summary=new_segments,
+                        start_date=start_date,
+                        start_activity_time=time(8, 0),  # Utiliser les valeurs par défaut ou récupérer depuis session_state
+                        end_activity_time=time(17, 0),
+                        start_travel_time=time(7, 0),
+                        end_travel_time=time(19, 0),
+                        use_lunch=True,
+                        lunch_start_time=time(12, 30),
+                        lunch_end_time=time(14, 0),
+                        use_prayer=False,
+                        prayer_start_time=time(14, 0),
+                        prayer_duration_min=20,
+                        max_days=30,
+                        tolerance_hours=1.0
+                    )
+                    
+                    # Mettre à jour les résultats
+                    st.session_state.manual_itinerary = new_itinerary
+                    st.session_state.planning_results.update({
+                        'sites_ordered': new_sites_ordered,
+                        'coords_ordered': new_coords_ordered,
+                        'stats': new_stats,
+                        'segments_summary': new_segments
+                    })
+                    
+                    st.success("✅ Itinéraire recalculé avec le nouvel ordre!")
+                    st.rerun()
+            
+            with col2:
+                if st.button("↩️ Restaurer l'ordre original", use_container_width=True):
+                    st.session_state.manual_order = original_order.copy()
+                    st.session_state.manual_itinerary = None
+                    st.success("Ordre original restauré!")
+                    st.rerun()
+            
+            with col3:
+                if st.button("🎯 Optimiser automatiquement", use_container_width=True):
+                    # Réoptimiser avec IA
+                    try:
+                        optimized_order = optimize_route_with_ai(sites_ordered, coords_ordered, base_location, deepseek_api_key)
+                        if optimized_order:
+                            st.session_state.manual_order = optimized_order
+                            st.success("Ordre optimisé automatiquement par IA!")
+                        else:
+                            # Fallback vers TSP si l'IA échoue
+                            optimized_order = solve_tsp_fixed_start_end(durations_matrix)
+                            st.session_state.manual_order = optimized_order
+                            st.warning("IA indisponible, optimisation TSP utilisée.")
+                    except Exception as e:
+                        # Fallback vers TSP en cas d'erreur
+                        optimized_order = solve_tsp_fixed_start_end(durations_matrix)
+                        st.session_state.manual_order = optimized_order
+                        st.warning(f"Erreur IA ({str(e)[:50]}...), optimisation TSP utilisée.")
+                    st.rerun()
+    
     with tab_map:
         st.subheader("Carte de l'itinéraire")
         
@@ -2465,7 +3360,7 @@ if st.session_state.planning_results:
             )
         
         with col_html:
-            html_export = build_professional_html(current_itinerary, start_date, stats, sites_ordered, segments_summary, default_speed_kmh)
+            html_export = build_professional_html(current_itinerary, start_date, stats, sites_ordered, segments_summary, default_speed_kmh, mission_title)
             st.download_button(
                 label="📥 Télécharger HTML",
                 data=html_export,
@@ -2479,7 +3374,7 @@ if st.session_state.planning_results:
 # --------------------------
 if st.session_state.planning_results:
     st.markdown("---")
-    st.header("📋 Génération de rapport de mission (IA)")
+    st.header("📋 Génération de rapport de mission")
     
     with st.expander("🤖 Générer un rapport complet avec l'IA", expanded=False):
         st.markdown("**Utilisez l'IA pour générer un rapport professionnel orienté activités**")
@@ -3289,5 +4184,5 @@ Fonction: {pv_fonction}
                             st.error("❌ Erreur lors de la génération du rapport")
 
 st.markdown("---")
-st.caption("🚀 Planificateur de Mission v2.4 - Rapport IA")
-st.caption("💻 Developed by @Moctar")
+st.caption("🚀 Planificateur de Mission v2.4")
+st.caption("💻 Developed by @Moctar All rights reserved")
