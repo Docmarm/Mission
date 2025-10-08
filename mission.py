@@ -2134,7 +2134,7 @@ if st.sidebar.button("🔍 Tester connexion Maps"):
 
 # Mention développeur
 st.sidebar.markdown("---")
-st.sidebar.caption("💻 Developed by @Moctar TAll (77 639 96 12))")
+st.sidebar.caption("💻 Developed by @Moctar TAll (77 639 96 12)")
 st.sidebar.caption("All rights reserved")
 
 # --------------------------
