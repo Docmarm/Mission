@@ -18,7 +18,7 @@ st.set_page_config(
 
 # Import des modules pour l'export PDF et Word
 try:
-    from pdf_generator import create_pv_pdf, create_word_document, create_mission_pdf
+    from pdf_generator import create_pv_pdf, create_word_document, create_mission_pdf, create_docx_document
     PDF_AVAILABLE = True
 except ImportError:
     PDF_AVAILABLE = False
@@ -51,14 +51,14 @@ deepseek_api_key = "sk-d7f2ac8ece8b4d66b1b8f418cdfdb813"
 st.sidebar.subheader("Calcul des distances")
 distance_method = st.sidebar.radio(
     "Méthode de calcul",
-    ["Auto (Maps puis Automatique puis Géométrique)", "Automatique uniquement", "Géométrique uniquement", "Maps uniquement"],
+    ["Auto (Automatique puis Maps puis Géométrique)", "Automatique uniquement", "Géométrique uniquement", "Maps uniquement"],
     index=0
 )
 
 use_deepseek_fallback = st.sidebar.checkbox(
-    "Utiliser Automatique si Maps échoue", 
+    "Utiliser Maps si Automatique échoue", 
     value=True,
-    help="Estime les durées via IA si le service de routage échoue"
+    help="Appeler le service de routage Maps si l'estimation automatique échoue"
 )
 
 with st.sidebar.expander("Options avancées"):
@@ -452,7 +452,7 @@ def collect_construction_report_data():
             guard_post = st.text_area(
                 "État du poste de garde",
                 placeholder="Ex: Peinture du poste de garde non conforme...",
-                height=60,
+                height=68,
                 key=f"guard_post_{i}"
             )
     
@@ -470,7 +470,7 @@ def collect_construction_report_data():
         "💡 Recommandations",
         placeholder="Ex: Il est impératif que KONE CONSTRUCTION mette en place un dispositif correctif immédiat...",
         height=120,
-        key="recommendations"
+        key="construction_recommendations"
     )
     
     # Informations du rapporteur
@@ -663,7 +663,7 @@ def collect_enhanced_mission_data():
             "💡 Recommandations",
             placeholder="Suggestions pour les prochaines missions...",
             height=100,
-            key="recommendations"
+            key="mission_recommendations"
         )
         
         overall_satisfaction = st.select_slider(
@@ -919,8 +919,8 @@ DONNÉES DE BASE:
 - Durée totale: {stats['total_days']} jour(s)
 - Distance totale: {stats['total_km']:.1f} km
 - Temps de visite total: {stats['total_visit_hours']:.1f} heures
-- Nombre de sites: {len(sites)}
-- Sites visités: {', '.join([s['Ville'] for s in sites])}
+- Nombre de sites visités: {len([s for s in sites if s.get('Type') != 'Base'])}
+- Sites visités: {', '.join([s.get('Ville') for s in sites if s.get('Type') != 'Base'])}
 - Méthode de calcul: {mission_data['calculation_method']}
 
 RÉPARTITION DES ACTIVITÉS:
@@ -979,8 +979,8 @@ DONNÉES DE LA MISSION:
 - Durée totale: {stats['total_days']} jour(s)
 - Distance totale: {stats['total_km']:.1f} km
 - Temps de visite total: {stats['total_visit_hours']:.1f} heures
-- Nombre de sites: {len(sites)}
-- Sites visités: {', '.join([s['Ville'] for s in sites])}
+- Nombre de sites visités: {len([s for s in sites if s.get('Type') != 'Base'])}
+- Sites visités: {', '.join([s.get('Ville') for s in sites if s.get('Type') != 'Base'])}
 - Méthode de calcul: {mission_data['calculation_method']}
 
 RÉPARTITION DES ACTIVITÉS:
@@ -1626,8 +1626,23 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                 if travel_end > travel_end_time:
                     # Travel extends beyond allowed hours - split across days
                     itinerary.append((day_count, current_datetime, travel_end_time, "🏁 Fin de journée"))
-                    prev_city = sites_ordered[idx-1]['Ville']
-                    itinerary.append((day_count, travel_end_time, travel_end_time, f"🏨 Nuitée à {prev_city}"))
+                    prev_site = sites_ordered[idx-1]
+                    prev_city = prev_site['Ville']
+                    prev_overnight_allowed = prev_site.get('Possibilité de nuitée', True)
+                    if prev_overnight_allowed:
+                        itinerary.append((day_count, travel_end_time, travel_end_time, f"🏨 Nuitée à {prev_city}"))
+                    else:
+                        # Pas d'hébergement autorisé à la ville précédente -> avertissement + nuitée de repli
+                        itinerary.append((day_count, travel_end_time, travel_end_time, f"⚠️ Déplacement nécessaire - pas d'hébergement à {prev_city}"))
+                        fallback_city = None
+                        for j in range(idx, len(sites_ordered)):
+                            if sites_ordered[j].get('Possibilité de nuitée', True):
+                                fallback_city = sites_ordered[j]['Ville']
+                                break
+                        if not fallback_city and base_location:
+                            fallback_city = base_location
+                        if fallback_city:
+                            itinerary.append((day_count, travel_end_time, travel_end_time, f"🏨 Nuitée à {fallback_city}"))
                     
                     day_count += 1
                     current_datetime = datetime.combine(start_date + timedelta(days=day_count-1), start_travel_time)
@@ -1688,8 +1703,8 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                         remaining_travel = travel_end - prayer_time
                         travel_end = current_datetime + remaining_travel
                 
-                # Add remaining travel time (only if not already added)
-                if not travel_added and current_datetime < travel_end:
+                # Add remaining travel time (include post-break remaining travel if any)
+                if current_datetime < travel_end:
                     itinerary.append((day_count, current_datetime, travel_end, travel_desc))
                 
                 current_datetime = travel_end
@@ -1733,7 +1748,20 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                     
                     # End current day
                     itinerary.append((day_count, activity_end_time, activity_end_time, "🏁 Fin de journée"))
-                    itinerary.append((day_count, activity_end_time, activity_end_time, f"🏨 Nuitée à {city}"))
+                    if overnight_allowed:
+                        itinerary.append((day_count, activity_end_time, activity_end_time, f"🏨 Nuitée à {city}"))
+                    else:
+                        itinerary.append((day_count, activity_end_time, activity_end_time, f"⚠️ Déplacement nécessaire - pas d'hébergement à {city}"))
+                        # Nuitée de repli vers un site prochain autorisé ou la base
+                        fallback_city = None
+                        for j in range(idx+1, len(sites_ordered)):
+                            if sites_ordered[j].get('Possibilité de nuitée', True):
+                                fallback_city = sites_ordered[j]['Ville']
+                                break
+                        if not fallback_city and base_location:
+                            fallback_city = base_location
+                        if fallback_city:
+                            itinerary.append((day_count, activity_end_time, activity_end_time, f"🏨 Nuitée à {fallback_city}"))
                     
                     # Start next day
                     remaining = visit_end - activity_end_time
@@ -1769,7 +1797,24 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                     # L'activité ne peut pas continuer - la forcer à se terminer à l'heure limite
                     visit_end = activity_end_time
                     if current_datetime >= activity_end_time:
-                        # Si on est déjà en dehors des heures, reporter au jour suivant
+                        # Si on est déjà en dehors des heures, terminer la journée et ajouter la nuitée (avec fallback si nécessaire)
+                        itinerary.append((day_count, current_datetime, current_datetime, "🏁 Fin de journée"))
+                        if overnight_allowed:
+                            itinerary.append((day_count, current_datetime, current_datetime, f"🏨 Nuitée à {city}"))
+                        else:
+                            itinerary.append((day_count, current_datetime, current_datetime, f"⚠️ Déplacement nécessaire - pas d'hébergement à {city}"))
+                            # Chercher une nuitée autorisée dans les sites suivants ou la base
+                            fallback_city = None
+                            for j in range(idx+1, len(sites_ordered)):
+                                if sites_ordered[j].get('Possibilité de nuitée', True):
+                                    fallback_city = sites_ordered[j]['Ville']
+                                    break
+                            if not fallback_city and base_location:
+                                fallback_city = base_location
+                            if fallback_city:
+                                itinerary.append((day_count, current_datetime, current_datetime, f"🏨 Nuitée à {fallback_city}"))
+                        
+                        # Reporter au jour suivant
                         day_count += 1
                         current_datetime = datetime.combine(start_date + timedelta(days=day_count-1), start_activity_time)
                         day_end_time = datetime.combine(start_date + timedelta(days=day_count-1), end_travel_time)
@@ -1833,7 +1878,21 @@ def schedule_itinerary(coords, sites, order, segments_summary,
             if time_until_end <= 1.5 and idx < len(sites_ordered) - 1:
                 # End current day and prepare for next day
                 itinerary.append((day_count, current_datetime, current_datetime, f"🏁 Fin de journée"))
-                itinerary.append((day_count, current_datetime, current_datetime, f"🏨 Nuitée à {city}"))
+                # Nuitée conditionnelle selon la possibilité
+                if overnight_allowed:
+                    itinerary.append((day_count, current_datetime, current_datetime, f"🏨 Nuitée à {city}"))
+                else:
+                    itinerary.append((day_count, current_datetime, current_datetime, f"⚠️ Déplacement nécessaire - pas d'hébergement à {city}"))
+                    # Chercher une nuitée autorisée dans les sites suivants ou la base
+                    fallback_city = None
+                    for j in range(idx+1, len(sites_ordered)):
+                        if sites_ordered[j].get('Possibilité de nuitée', True):
+                            fallback_city = sites_ordered[j]['Ville']
+                            break
+                    if not fallback_city and base_location:
+                        fallback_city = base_location
+                    if fallback_city:
+                        itinerary.append((day_count, current_datetime, current_datetime, f"🏨 Nuitée à {fallback_city}"))
                 
                 # Start next day
                 day_count += 1
@@ -2215,16 +2274,36 @@ def create_mission_excel(itinerary, start_date, stats, sites_ordered, segments_s
 
 # Test de connexion
 if st.sidebar.button("🔍 Tester connexion Maps"):
-    with st.spinner("Test en cours..."):
-        success, message = test_graphhopper_connection(graphhopper_api_key)
-        if success:
-            st.sidebar.success(f"✅ {message}")
-        else:
-            st.sidebar.error(f"❌ {message}")
+    # Animation d'attente améliorée
+    progress_bar = st.sidebar.progress(0)
+    status_text = st.sidebar.empty()
+    
+    # Étape 1: Initialisation
+    progress_bar.progress(25)
+    status_text.text("🔄 Initialisation du test...")
+    
+    # Étape 2: Test de connexion
+    progress_bar.progress(75)
+    status_text.text("🌐 Test de connexion Maps...")
+    
+    success, message = test_graphhopper_connection(graphhopper_api_key)
+    
+    # Étape 3: Finalisation
+    progress_bar.progress(100)
+    status_text.text("✅ Test terminé")
+    
+    # Nettoyage de l'animation
+    progress_bar.empty()
+    status_text.empty()
+    
+    if success:
+        st.sidebar.success(f"✅ {message}")
+    else:
+        st.sidebar.error(f"❌ {message}")
 
 # Mention développeur
 st.sidebar.markdown("---")
-st.sidebar.caption("💻 Developed by @Moctar TAll (77 639 96 12)")
+st.sidebar.caption("💻 Developed by @Moctar TAll (+221 77 639 96 12)")
 st.sidebar.caption("All rights reserved")
 
 # --------------------------
@@ -2834,21 +2913,25 @@ if plan_button:
         st.warning(f"📊 Méthode: {calculation_method}")
     
     else:
-        # Mode Auto
-        durations_sec, distances_m, error_msg = improved_graphhopper_duration_matrix(graphhopper_api_key, coords)
-        
-        if durations_sec is not None:
-            calculation_method = "Maps"
+        # Mode Auto: Automatique → (Maps si coché) → Géométrique
+        result, error_msg = improved_deepseek_estimate_matrix(city_list, deepseek_api_key, debug_mode)
+        if result:
+            durations_sec, distances_m = result
+            calculation_method = "Automatique"
         else:
-            if use_deepseek_fallback and deepseek_api_key:
-                result, _ = improved_deepseek_estimate_matrix(city_list, deepseek_api_key, debug_mode)
-                if result:
-                    durations_sec, distances_m = result
-                    calculation_method = "Automatique"
-
-        if durations_sec is None:
-            durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
-            calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
+            if use_deepseek_fallback and graphhopper_api_key:
+                # Tentative 2: Maps
+                durations_sec, distances_m, error_msg = improved_graphhopper_duration_matrix(graphhopper_api_key, coords)
+                if durations_sec is not None:
+                    calculation_method = "Maps"
+                else:
+                    # Tentative 3: Géométrique
+                    durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
+                    calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
+            else:
+                # Sans fallback Maps, passer directement au géométrique
+                durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
+                calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
         
         method_color = "success" if "Maps" in calculation_method else "info" if "Automatique" in calculation_method else "warning"
         getattr(st, method_color)(f"📊 Méthode: {calculation_method}")
@@ -3042,11 +3125,13 @@ if st.session_state.planning_results:
     with col2:
         st.metric("Distance totale", f"{stats['total_km']:.1f} km")
     with col3:
-        st.metric("Sites visités", f"{len(sites_ordered)}")
+        # Compter seulement les vrais sites (exclure les sites de type "Base")
+        actual_sites_count = len([site for site in sites_ordered if site.get('Type') != 'Base'])
+        st.metric("Sites visités", f"{actual_sites_count}")
     with col4:
         st.metric("Temps de visite", f"{stats['total_visit_hours']:.1f} h")
     
-    tab_planning, tab_fuel, tab_edit, tab_manual, tab_map, tab_export = st.tabs(["📅 Planning", "⛽ Carburant", "✏️ Éditer", "🔄 Modifier ordre", "🗺️ Carte", "💾 Export"])
+    tab_planning, tab_map, tab_fuel, tab_edit, tab_manual, tab_report, tab_export = st.tabs(["📅 Planning", "🗺️ Carte", "⛽ Carburant", "✏️ Éditer", "🔄 Modifier ordre", "📋 Rapport", "💾 Export"])
     
     with tab_planning:
         st.subheader("Planning détaillé")
@@ -3207,6 +3292,479 @@ if st.session_state.planning_results:
                     st.write(f"• Arbres à planter pour compenser : **{carbon_data['trees_equivalent']:.0f} arbres**")
                     st.write("• *(1 arbre absorbe ~22 kg CO₂/an)*")
                 
+                st.divider()
+                
+                # Section demande de carburant
+                st.subheader("📋 Demande de véhicule ou de carburant")
+                
+                col_btn1, col_btn2 = st.columns(2)
+                with col_btn1:
+                    if st.button("📝 Générer demande de carburant", type="primary", use_container_width=True):
+                        st.session_state.show_fuel_request_modal = True
+                
+                with col_btn2:
+                    st.info("💡 Génère un document Word")
+                
+                # Modal pour la demande de carburant
+                if st.session_state.get('show_fuel_request_modal', False):
+                    with st.container():
+                        st.markdown("---")
+                        st.subheader("📋 Informations pour la demande de carburant")
+                        st.info("💡 Remplissez les informations manquantes pour générer le document")
+                        
+                        # Afficher les informations de la mission si disponibles
+                        if st.session_state.planning_results:
+                            stats = st.session_state.planning_results['stats']
+                            with st.expander("📊 Informations de la mission", expanded=True):
+                                col_info1, col_info2, col_info3 = st.columns(3)
+                                with col_info1:
+                                    st.metric("🗓️ Durée", f"{stats['total_days']} jour(s)")
+                                with col_info2:
+                                    # Utiliser le nombre de sites configurés par l'utilisateur
+                                    nb_sites = len(st.session_state.sites_df) if 'sites_df' in st.session_state else 0
+                                    st.metric("📍 Sites à visiter", f"{nb_sites}")
+                                with col_info3:
+                                    st.metric("🛣️ Distance totale", f"{stats.get('total_km', 0):.1f} km")
+                        
+                        # Informations du demandeur
+                        col_req1, col_req2 = st.columns(2)
+                        
+                        with col_req1:
+                            st.markdown("**👤 Informations du demandeur**")
+                            demandeur_nom = st.text_input("Nom et qualité du demandeur", 
+                                                        value="",
+                                                        placeholder="Ex: Moctar TALL Responsable de projets",
+                                                        key="fuel_req_nom")
+                            demandeur_dir = st.text_input("Direction/Département", 
+                                                        value="",
+                                                        placeholder="Ex: DAL/GPR",
+                                                        key="fuel_req_dir")
+                            demandeur_cr = st.text_input("N° C.R.", 
+                                                       value="",
+                                                       placeholder="Ex: L2100",
+                                                       key="fuel_req_cr")
+                            demandeur_tel = st.text_input("N° Téléphone", 
+                                                        value="",
+                                                        placeholder="Ex: 77 639 96 12",
+                                                        key="fuel_req_tel")
+                        
+                        with col_req2:
+                            st.markdown("**📋 Détails de la mission**")
+                            motif_demande = st.text_area("Motif de la demande", 
+                                                       value=mission_title,
+                                                       key="fuel_req_motif",
+                                                       height=100)
+                            
+                            col_nb_pers, col_carburant = st.columns(2)
+                            with col_nb_pers:
+                                nb_personnes = st.number_input("Nombre de personnes", 
+                                                             min_value=1, max_value=20, value=2,
+                                                             key="fuel_req_nb_pers")
+                            
+                            with col_carburant:
+                                # Utiliser le même calcul que dans les résultats des calculs
+                                default_fuel = 50
+                                if st.session_state.planning_results:
+                                    distance = st.session_state.planning_results['stats'].get('total_km', 0)
+                                    if distance > 0:
+                                        # Utiliser le même calcul que dans la section "Carburant nécessaire"
+                                        # Par défaut, utiliser Station-Wagon (8.5 L/100km)
+                                        fuel_data = calculate_fuel_consumption(distance, "Station-Wagon")
+                                        default_fuel = int(fuel_data['fuel_needed_liters'])
+                                    else:
+                                        default_fuel = 50
+                                
+                                quantite_carburant = st.number_input("Quantité de carburant (litres)", 
+                                                                   min_value=0, max_value=1000, 
+                                                                   value=default_fuel,
+                                                                   key="fuel_req_quantity",
+                                                                   help="Quantité calculée automatiquement selon la distance et le type de véhicule (Station-Wagon par défaut)")
+                        
+                        # Dates automatiquement récupérées du planning
+                        if st.session_state.planning_results:
+                            # Récupérer les dates du planning
+                            planning_start_date = st.session_state.planning_results['start_date']
+                            itinerary = st.session_state.manual_itinerary or st.session_state.planning_results['itinerary']
+                            stats = st.session_state.planning_results['stats']
+                            
+                            # Calculer la date de retour (date de début + nombre de jours - 1)
+                            planning_end_date = planning_start_date + timedelta(days=stats['total_days'] - 1)
+                            
+                            # Afficher les dates récupérées du planning
+                            col_date1, col_date2 = st.columns(2)
+                            with col_date1:
+                                st.markdown("**📅 Date de départ**")
+                                st.info(f"🗓️ {planning_start_date.strftime('%d/%m/%Y')}")
+                                date_depart = planning_start_date
+                            with col_date2:
+                                st.markdown("**📅 Date de retour**")
+                                st.info(f"🗓️ {planning_end_date.strftime('%d/%m/%Y')}")
+                                date_retour = planning_end_date
+                        else:
+                            # Si pas de planning, utiliser les champs manuels
+                            col_date1, col_date2 = st.columns(2)
+                            with col_date1:
+                                date_depart = st.date_input("Date de départ prévue", 
+                                                          value=datetime.now().date(),
+                                                          key="fuel_req_date_dep")
+                            with col_date2:
+                                date_retour = st.date_input("Date de retour prévue", 
+                                                          value=datetime.now().date(),
+                                                          key="fuel_req_date_ret")
+                        
+                        # Boutons d'action
+                        col_action1, col_action2, col_action3 = st.columns(3)
+                        
+                        with col_action1:
+                            if st.button("📄 Générer document Word", type="primary", use_container_width=True):
+                                # Générer le document Word
+                                try:
+                                    from docx import Document
+                                    from docx.shared import Inches, Pt, Cm
+                                    from docx.enum.text import WD_ALIGN_PARAGRAPH
+                                    from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
+                                    from docx.oxml.shared import OxmlElement, qn
+                                    from docx.oxml.ns import nsdecls
+                                    from docx.oxml import parse_xml
+                                    import io
+                                    
+                                    # Créer le document
+                                    doc = Document()
+                                    
+                                    # Définir les marges
+                                    sections = doc.sections
+                                    for section in sections:
+                                        section.top_margin = Cm(2)
+                                        section.bottom_margin = Cm(2)
+                                        section.left_margin = Cm(2)
+                                        section.right_margin = Cm(2)
+                                    
+                                    # En-tête principal
+                                    header_para = doc.add_paragraph()
+                                    header_run = header_para.add_run('DEMANDE DE CARBURANT')
+                                    header_run.font.name = 'Tahoma'
+                                    header_run.font.size = Pt(14)
+                                    header_run.bold = True
+                                    header_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                    
+                                    # Sous-titre
+                                    subtitle_para = doc.add_paragraph()
+                                    subtitle_run = subtitle_para.add_run('A remplir et à déposer à la DAL/GPR')
+                                    subtitle_run.font.name = 'Tahoma'
+                                    subtitle_run.font.size = Pt(11)
+                                    subtitle_run.italic = True
+                                    subtitle_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                    
+                                    # Espace
+                                    doc.add_paragraph()
+                                    
+                                    # Numéro de demande avec encadrement
+                                    num_table = doc.add_table(rows=1, cols=1)
+                                    num_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+                                    num_cell = num_table.cell(0, 0)
+                                    num_cell.width = Cm(6)
+                                    num_para = num_cell.paragraphs[0]
+                                    num_run = num_para.add_run('N°')
+                                    num_run.font.name = 'Tahoma'
+                                    num_run.font.size = Pt(11)
+                                    num_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                    
+                                    # Bordures pour le numéro
+                                    def set_cell_border(cell, **kwargs):
+                                        tc = cell._tc
+                                        tcPr = tc.get_or_add_tcPr()
+                                        tcBorders = tcPr.first_child_found_in("w:tcBorders")
+                                        if tcBorders is None:
+                                            tcBorders = OxmlElement('w:tcBorders')
+                                            tcPr.append(tcBorders)
+                                        
+                                        for edge in ('top', 'left', 'bottom', 'right'):
+                                            edge_data = kwargs.get(edge)
+                                            if edge_data:
+                                                tag = 'w:{}'.format(edge)
+                                                element = tcBorders.find(qn(tag))
+                                                if element is None:
+                                                    element = OxmlElement(tag)
+                                                    tcBorders.append(element)
+                                                for key, value in edge_data.items():
+                                                    element.set(qn('w:{}'.format(key)), str(value))
+                                    
+                                    border_kwargs = {
+                                        'top': {'sz': 12, 'val': 'single', 'color': '000000'},
+                                        'bottom': {'sz': 12, 'val': 'single', 'color': '000000'},
+                                        'left': {'sz': 12, 'val': 'single', 'color': '000000'},
+                                        'right': {'sz': 12, 'val': 'single', 'color': '000000'}
+                                    }
+                                    set_cell_border(num_cell, **border_kwargs)
+                                    
+                                    # Espace
+                                    doc.add_paragraph()
+                                    
+                                    # Tableau principal des informations
+                                    main_table = doc.add_table(rows=2, cols=2)
+                                    main_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+                                    
+                                    # Définir les largeurs des colonnes
+                                    main_table.columns[0].width = Cm(8)
+                                    main_table.columns[1].width = Cm(8)
+                                    
+                                    # Première ligne - Nom du demandeur
+                                    cell_demandeur = main_table.cell(0, 0)
+                                    cell_demandeur.vertical_alignment = WD_ALIGN_VERTICAL.TOP
+                                    para_demandeur = cell_demandeur.paragraphs[0]
+                                    run_title = para_demandeur.add_run('Nom et qualité du demandeur\n')
+                                    run_title.font.name = 'Tahoma'
+                                    run_title.font.size = Pt(11)
+                                    run_title.bold = True
+                                    
+                                    run_name = para_demandeur.add_run(f'{demandeur_nom}\n\n')
+                                    run_name.font.name = 'Tahoma'
+                                    run_name.font.size = Pt(11)
+                                    
+                                    run_details = para_demandeur.add_run(f'DIR. /DEP. : {demandeur_dir}\nN° C.R.     : {demandeur_cr}\nN° Tél.     : {demandeur_tel}')
+                                    run_details.font.name = 'Tahoma'
+                                    run_details.font.size = Pt(11)
+                                    
+                                    # Première ligne - Motif de la demande
+                                    cell_motif = main_table.cell(0, 1)
+                                    cell_motif.vertical_alignment = WD_ALIGN_VERTICAL.TOP
+                                    para_motif = cell_motif.paragraphs[0]
+                                    run_motif_title = para_motif.add_run('Motif de la demande\n\n')
+                                    run_motif_title.font.name = 'Tahoma'
+                                    run_motif_title.font.size = Pt(11)
+                                    run_motif_title.bold = True
+                                    
+                                    run_motif_content = para_motif.add_run(motif_demande)
+                                    run_motif_content.font.name = 'Tahoma'
+                                    run_motif_content.font.size = Pt(11)
+                                    
+                                    # Deuxième ligne - Dates
+                                    cell_dates = main_table.cell(1, 0)
+                                    cell_dates.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+                                    para_dates = cell_dates.paragraphs[0]
+                                    
+                                    run_depart = para_dates.add_run(f'Départ prévu : {date_depart.strftime("%d/%m/%Y")}\n\n')
+                                    run_depart.font.name = 'Tahoma'
+                                    run_depart.font.size = Pt(11)
+                                    
+                                    run_retour = para_dates.add_run(f'Retour prévu : {date_retour.strftime("%d/%m/%Y")}')
+                                    run_retour.font.name = 'Tahoma'
+                                    run_retour.font.size = Pt(11)
+                                    
+                                    # Deuxième ligne - Nombre de personnes et quantité de carburant
+                                    cell_nb = main_table.cell(1, 1)
+                                    cell_nb.vertical_alignment = WD_ALIGN_VERTICAL.TOP
+                                    para_nb = cell_nb.paragraphs[0]
+                                    
+                                    run_nb = para_nb.add_run(f'Nombre de personnes : {nb_personnes:02d}\n\n')
+                                    run_nb.font.name = 'Tahoma'
+                                    run_nb.font.size = Pt(11)
+                                    
+                                    # Nouveau champ pour la quantité de carburant
+                                    run_carburant_title = para_nb.add_run('Quantité de carburant demandée :\n\n')
+                                    run_carburant_title.font.name = 'Tahoma'
+                                    run_carburant_title.font.size = Pt(11)
+                                    run_carburant_title.bold = True
+                                    
+                                    run_carburant_value = para_nb.add_run(f'{quantite_carburant} litres')
+                                    run_carburant_value.font.name = 'Tahoma'
+                                    run_carburant_value.font.size = Pt(11)
+                                    
+                                    # Appliquer les bordures au tableau principal
+                                    for row in main_table.rows:
+                                        for cell in row.cells:
+                                            set_cell_border(cell, **border_kwargs)
+                                    
+                                    # Espace
+                                    doc.add_paragraph()
+                                    
+                                    # Tableau itinéraire
+                                    itinerary_table = doc.add_table(rows=1, cols=2)
+                                    itinerary_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+                                    itinerary_table.columns[0].width = Cm(12)
+                                    itinerary_table.columns[1].width = Cm(4)
+                                    
+                                    # En-têtes du tableau itinéraire
+                                    hdr_cells = itinerary_table.rows[0].cells
+                                    
+                                    hdr_para1 = hdr_cells[0].paragraphs[0]
+                                    hdr_run1 = hdr_para1.add_run('Itinéraire à suivre')
+                                    hdr_run1.font.name = 'Tahoma'
+                                    hdr_run1.font.size = Pt(11)
+                                    hdr_run1.bold = True
+                                    hdr_para1.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                    
+                                    hdr_para2 = hdr_cells[1].paragraphs[0]
+                                    hdr_run2 = hdr_para2.add_run('KM')
+                                    hdr_run2.font.name = 'Tahoma'
+                                    hdr_run2.font.size = Pt(11)
+                                    hdr_run2.bold = True
+                                    hdr_para2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                    
+                                    # Ajouter les sites de la mission ou lignes vides
+                                    if st.session_state.planning_results:
+                                        sites = st.session_state.planning_results.get('sites_ordered', [])
+                                        segments = st.session_state.planning_results.get('segments_summary', [])
+                                        base_location = st.session_state.planning_results.get('base_location', '')
+                                        
+                                        # Commencer à partir du deuxième site pour éviter d'afficher juste "Dakar"
+                                        for i in range(1, len(sites)):
+                                            row_cells = itinerary_table.add_row().cells
+                                            
+                                            para_site = row_cells[0].paragraphs[0]
+                                            prev_site = sites[i-1]
+                                            current_site = sites[i]
+                                            site_text = f"{prev_site['Ville']} → {current_site['Ville']}"
+                                            
+                                            run_site = para_site.add_run(site_text)
+                                            run_site.font.name = 'Tahoma'
+                                            run_site.font.size = Pt(11)
+                                            
+                                            para_km = row_cells[1].paragraphs[0]
+                                            # Utiliser l'index i-1 pour les segments car on commence à i=1
+                                            if (i-1) < len(segments):
+                                                distance_km = segments[i-1]['distance'] / 1000
+                                                km_text = f"{distance_km:.1f}"
+                                            else:
+                                                km_text = "___"
+                                            
+                                            run_km = para_km.add_run(km_text)
+                                            run_km.font.name = 'Tahoma'
+                                            run_km.font.size = Pt(11)
+                                            para_km.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                        
+                                        # Distance totale
+                                        total_row = itinerary_table.add_row().cells
+                                        para_total = total_row[0].paragraphs[0]
+                                        run_total = para_total.add_run('Distance totale :')
+                                        run_total.font.name = 'Tahoma'
+                                        run_total.font.size = Pt(11)
+                                        run_total.bold = True
+                                        
+                                        para_total_km = total_row[1].paragraphs[0]
+                                        run_total_km = para_total_km.add_run(f"{stats.get('total_km', 0):.1f}")
+                                        run_total_km.font.name = 'Tahoma'
+                                        run_total_km.font.size = Pt(11)
+                                        run_total_km.bold = True
+                                        para_total_km.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                    else:
+                                        # Lignes vides si pas de planning
+                                        for _ in range(8):
+                                            row_cells = itinerary_table.add_row().cells
+                                            para_empty = row_cells[0].paragraphs[0]
+                                            run_empty = para_empty.add_run("")
+                                            run_empty.font.name = 'Tahoma'
+                                            run_empty.font.size = Pt(11)
+                                            
+                                            para_empty_km = row_cells[1].paragraphs[0]
+                                            run_empty_km = para_empty_km.add_run("")
+                                            run_empty_km.font.name = 'Tahoma'
+                                            run_empty_km.font.size = Pt(11)
+                                        
+                                        # Distance totale vide
+                                        total_row = itinerary_table.add_row().cells
+                                        para_total = total_row[0].paragraphs[0]
+                                        run_total = para_total.add_run('Distance totale :')
+                                        run_total.font.name = 'Tahoma'
+                                        run_total.font.size = Pt(11)
+                                        run_total.bold = True
+                                        
+                                        para_total_km = total_row[1].paragraphs[0]
+                                        run_total_km = para_total_km.add_run("")
+                                        run_total_km.font.name = 'Tahoma'
+                                        run_total_km.font.size = Pt(11)
+                                    
+                                    # Appliquer les bordures au tableau itinéraire
+                                    for row in itinerary_table.rows:
+                                        for cell in row.cells:
+                                            set_cell_border(cell, **border_kwargs)
+                                    
+                                    # Espace réduit
+                                    doc.add_paragraph()
+                                    
+                                    # Date
+                                    date_para = doc.add_paragraph()
+                                    date_run = date_para.add_run(f'Date : Le {datetime.now().strftime("%d/%m/%Y")}')
+                                    date_run.font.name = 'Tahoma'
+                                    date_run.font.size = Pt(11)
+                                    date_para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                                    
+                                    # Tableau des signatures
+                                    sig_table = doc.add_table(rows=1, cols=3)
+                                    sig_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+                                    
+                                    # Définir les largeurs des colonnes de signature
+                                    sig_table.columns[0].width = Cm(5.3)
+                                    sig_table.columns[1].width = Cm(5.3)
+                                    sig_table.columns[2].width = Cm(5.3)
+                                    
+                                    # Contenu des cellules de signature
+                                    sig_cells = sig_table.rows[0].cells
+                                    
+                                    # Première signature
+                                    para_sig1 = sig_cells[0].paragraphs[0]
+                                    run_sig1_title = para_sig1.add_run('Signature et cachet\n')
+                                    run_sig1_title.font.name = 'Tahoma'
+                                    run_sig1_title.font.size = Pt(11)
+                                    run_sig1_title.bold = True
+                                    para_sig1.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                    
+                                    run_sig1_subtitle = para_sig1.add_run('Chef de service Demandeur')
+                                    run_sig1_subtitle.font.name = 'Tahoma'
+                                    run_sig1_subtitle.font.size = Pt(11)
+                                    
+                                    # Deuxième signature
+                                    para_sig2 = sig_cells[1].paragraphs[0]
+                                    run_sig2 = para_sig2.add_run('Responsable POOL')
+                                    run_sig2.font.name = 'Tahoma'
+                                    run_sig2.font.size = Pt(11)
+                                    run_sig2.bold = True
+                                    para_sig2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                    
+                                    # Troisième signature
+                                    para_sig3 = sig_cells[2].paragraphs[0]
+                                    run_sig3 = para_sig3.add_run('DAL/GPR')
+                                    run_sig3.font.name = 'Tahoma'
+                                    run_sig3.font.size = Pt(11)
+                                    run_sig3.bold = True
+                                    para_sig3.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                    
+                                    # Définir la hauteur des cellules de signature
+                                    for cell in sig_cells:
+                                        cell.vertical_alignment = WD_ALIGN_VERTICAL.TOP
+                                        # Ajouter de l'espace pour les signatures
+                                        for _ in range(4):
+                                            cell.add_paragraph()
+                                    
+                                    # Appliquer les bordures au tableau de signatures
+                                    for row in sig_table.rows:
+                                        for cell in row.cells:
+                                            set_cell_border(cell, **border_kwargs)
+                                    
+                                    # Sauvegarder dans un buffer
+                                    buffer = io.BytesIO()
+                                    doc.save(buffer)
+                                    buffer.seek(0)
+                                    
+                                    # Bouton de téléchargement
+                                    st.success("✅ Document généré avec succès!")
+                                    st.download_button(
+                                        label="📥 Télécharger la demande de carburant (Word)",
+                                        data=buffer.getvalue(),
+                                        file_name=f"Demande_carburant_{datetime.now().strftime('%Y%m%d_%H%M')}.docx",
+                                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                    )
+                                    
+                                except ImportError:
+                                    st.error("❌ Le module python-docx n'est pas installé. Veuillez l'installer avec: pip install python-docx")
+                                except Exception as e:
+                                    st.error(f"❌ Erreur lors de la génération du document: {str(e)}")
+                        
+                        with col_action2:
+                            if st.button("❌ Annuler", use_container_width=True):
+                                st.session_state.show_fuel_request_modal = False
+                                st.rerun()
+
 
                 
             else:
@@ -3444,8 +4002,8 @@ if st.session_state.planning_results:
             with st.container():
                 # Utiliser des boutons pour déplacer les sites
                 for i, site_idx in enumerate(st.session_state.manual_order):
-                    # Vérifier que l'index est valide
-                    if site_idx < len(sites_ordered):
+                    # Vérifier que l'index est valide et de type entier
+                    if isinstance(site_idx, int) and 0 <= site_idx < len(sites_ordered):
                         site = sites_ordered[site_idx]
                         
                         col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
@@ -3552,15 +4110,15 @@ if st.session_state.planning_results:
                 if st.button("🎯 Optimiser automatiquement", use_container_width=True):
                     # Réoptimiser avec IA
                     try:
-                        optimized_order = optimize_route_with_ai(sites_ordered, coords_ordered, base_location, deepseek_api_key)
-                        if optimized_order:
-                            st.session_state.manual_order = optimized_order
-                            st.success("Ordre optimisé automatiquement par IA!")
+                        ai_order, ai_success, ai_message = optimize_route_with_ai(sites_ordered, coords_ordered, base_location, deepseek_api_key)
+                        if ai_success and isinstance(ai_order, list):
+                            st.session_state.manual_order = ai_order
+                            st.success(f"Ordre optimisé automatiquement par IA! {ai_message}")
                         else:
-                            # Fallback vers TSP si l'IA échoue
+                            # Fallback vers TSP si l'IA échoue ou réponse invalide
                             optimized_order = solve_tsp_fixed_start_end(durations_matrix)
                             st.session_state.manual_order = optimized_order
-                            st.warning("IA indisponible, optimisation TSP utilisée.")
+                            st.warning(f"IA indisponible ou réponse invalide, optimisation TSP utilisée. {ai_message if not ai_success else ''}")
                     except Exception as e:
                         # Fallback vers TSP en cas d'erreur
                         optimized_order = solve_tsp_fixed_start_end(durations_matrix)
@@ -3577,18 +4135,74 @@ if st.session_state.planning_results:
             
             m = folium.Map(location=[center_lat, center_lon], zoom_start=7)
             
-            poly_pts = [[c[1], c[0]] for c in coords_ordered]
-            folium.PolyLine(locations=poly_pts, color="blue", weight=3, opacity=0.7).add_to(m)
+            # Tracé de l'itinéraire : tentative de récupération de la route réelle via OSRM, sinon fallback sur la ligne droite
+            try:
+                coord_str = ";".join([f"{c[0]},{c[1]}" for c in coords_ordered])
+                url = f"https://router.project-osrm.org/route/v1/driving/{coord_str}?overview=full&geometries=geojson"
+                resp = requests.get(url, timeout=10)
+                route_pts = None
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get('routes'):
+                        geom = data['routes'][0].get('geometry')
+                        if isinstance(geom, dict) and geom.get('coordinates'):
+                            route_pts = [[lat, lon] for lon, lat in geom['coordinates']]
+                if not route_pts:
+                    route_pts = [[c[1], c[0]] for c in coords_ordered]
+            except Exception:
+                route_pts = [[c[1], c[0]] for c in coords_ordered]
+            folium.PolyLine(locations=route_pts, color="blue", weight=3, opacity=0.7).add_to(m)
             
+            # Préparer affichage spécial si départ et arrivée sont au même endroit
+            n_steps = len(sites_ordered)
+            start_end_same = False
+            if n_steps >= 2:
+                lat0, lon0 = coords_ordered[0][1], coords_ordered[0][0]
+                latN, lonN = coords_ordered[-1][1], coords_ordered[-1][0]
+                start_end_same = abs(lat0 - latN) < 1e-4 and abs(lon0 - lonN) < 1e-4
+
             for i, site in enumerate(sites_ordered):
+                # Si le départ et l'arrivée sont identiques, afficher un double numéro sur le point de départ et ne pas dupliquer le dernier point
+                if i == 0 and start_end_same:
+                    bg_color_left = '#2ecc71'  # Vert pour départ
+                    bg_color_right = '#e74c3c'  # Rouge pour arrivée
+                    html = f"""
+<div style=\"display:flex; align-items:center; gap:4px;\">
+  <div style=\"background-color:{bg_color_left}; color:white; border-radius:50%; width:28px; height:28px; text-align:center; font-size:14px; font-weight:bold; line-height:28px; border:2px solid white; box-shadow:0 0 3px rgba(0,0,0,0.5);\">1</div>
+  <div style=\"background-color:{bg_color_right}; color:white; border-radius:50%; width:28px; height:28px; text-align:center; font-size:14px; font-weight:bold; line-height:28px; border:2px solid white; box-shadow:0 0 3px rgba(0,0,0,0.5);\">{n_steps}</div>
+</div>
+"""
+                    folium.Marker(
+                        location=[coords_ordered[i][1], coords_ordered[i][0]],
+                        popup=f"Étapes 1 et {n_steps}: {site['Ville']}<br>{site.get('Type', '-')}",
+                        tooltip=f"Étapes 1 et {n_steps}: {site['Ville']}",
+                        icon=folium.DivIcon(
+                            icon_size=(36, 28),
+                            icon_anchor=(18, 14),
+                            html=html
+                        )
+                    ).add_to(m)
+                    continue
+                if start_end_same and i == n_steps - 1:
+                    # Ne pas dupliquer l'arrivée si elle est au même endroit que le départ
+                    continue
+
                 color = 'green' if i == 0 else 'red' if i == len(sites_ordered)-1 else 'blue'
                 icon = 'play' if i == 0 else 'stop' if i == len(sites_ordered)-1 else 'info-sign'
                 
+                # Icône numérotée via DivIcon (couleur selon étape)
+                bg_color = '#2ecc71' if i == 0 else '#e74c3c' if i == len(sites_ordered)-1 else '#3498db'
                 folium.Marker(
                     location=[coords_ordered[i][1], coords_ordered[i][0]],
                     popup=f"Étape {i+1}: {site['Ville']}<br>{site.get('Type', '-')}",
                     tooltip=f"Étape {i+1}: {site['Ville']}",
-                    icon=folium.Icon(color=color, icon=icon)
+                    icon=folium.DivIcon(
+                        icon_size=(28, 28),
+                        icon_anchor=(14, 14),
+                        html=f"""
+<div style=\"background-color:{bg_color}; color:white; border-radius:50%; width:28px; height:28px; text-align:center; font-size:14px; font-weight:bold; line-height:28px; border:2px solid white; box-shadow:0 0 3px rgba(0,0,0,0.5);\">{i+1}</div>
+"""
+                    )
                 ).add_to(m)
             
             st_folium(m, width=None, height=500, use_container_width=True)
@@ -3638,10 +4252,579 @@ if st.session_state.planning_results:
                 use_container_width=True
             )
 
+    with tab_report:
+        st.subheader("📋 Génération de rapport de mission")
+        
+        with st.expander("🤖 Générer un rapport complet", expanded=False):
+            st.markdown("**Utilisez l'IA pour générer un rapport professionnel orienté activités**")
+            
+            # Onglets pour organiser l'interface
+            tab_basic, tab_details, tab_questions, tab_construction, tab_generate = st.tabs([
+                "📝 Rapport basique", "📋 Détails mission", "🤖 Questions IA", "🏗️ Procès-verbal", "🚀 Génération"
+            ])
+            
+            with tab_basic:
+                st.markdown("### 📄 Rapport rapide (version simplifiée)")
+                
+                # Options de rapport basique
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    report_type = st.selectbox(
+                        "Type de rapport",
+                        ["Rapport complet", "Résumé exécutif", "Rapport technique", "Rapport financier", "Procès-verbal professionnel"],
+                        help="Choisissez le type de rapport à générer"
+                    )
+                
+                with col2:
+                    report_tone = st.selectbox(
+                        "Ton du rapport",
+                        ["Professionnel", "Formel", "Décontracté", "Technique"],
+                        help="Définissez le ton du rapport"
+                    )
+                
+                # Options avancées (sans expander imbriqué)
+                st.markdown("**Options avancées**")
+                
+                col_opt1, col_opt2 = st.columns(2)
+                
+                with col_opt1:
+                    include_recommendations = st.checkbox("Inclure des recommandations", value=True)
+                    include_risks = st.checkbox("Analyser les risques", value=False)
+                
+                with col_opt2:
+                    include_costs = st.checkbox("Estimation des coûts", value=False)
+                    include_timeline = st.checkbox("Planning détaillé", value=True)
+                
+                custom_context = st.text_area(
+                    "Contexte supplémentaire (optionnel)",
+                    placeholder="Ajoutez des informations spécifiques à votre mission...",
+                    height=100
+                )
+                
+                if st.button("🚀 Générer rapport basique", type="primary", use_container_width=True):
+                    if st.session_state.planning_results:
+                        # Animation d'attente améliorée avec barre de progression
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        try:
+                            status_text.text("🔄 Collecte des données de mission...")
+                            progress_bar.progress(20)
+                            mission_data = collect_mission_data_for_ai()
+                                
+                            status_text.text("📝 Construction du prompt...")
+                            progress_bar.progress(40)
+                            prompt = build_report_prompt(
+                                mission_data, report_type, report_tone,
+                                include_recommendations, include_risks, 
+                                include_costs, include_timeline, custom_context
+                            )
+                            
+                            status_text.text("🤖 Génération du rapport par l'IA...")
+                            progress_bar.progress(60)
+                            response = requests.post(
+                                "https://api.deepseek.com/v1/chat/completions",
+                                headers={
+                                    "Authorization": f"Bearer {deepseek_api_key}",
+                                    "Content-Type": "application/json"
+                                },
+                                json={
+                                    "model": "deepseek-chat",
+                                    "messages": [{"role": "user", "content": prompt}],
+                                    "temperature": 0.7,
+                                    "max_tokens": 4000
+                                }
+                            )
+                            
+                            status_text.text("✅ Finalisation du rapport...")
+                            progress_bar.progress(100)
+                            
+                            if response.status_code == 200:
+                                report_content = response.json()["choices"][0]["message"]["content"]
+                                
+                                # Nettoyer les éléments d'animation
+                                progress_bar.empty()
+                                status_text.empty()
+                                
+                                st.success("✅ Rapport généré avec succès!")
+                                
+                                # Affichage du rapport
+                                st.markdown("### 📄 Votre rapport")
+                                st.markdown(report_content)
+                                
+                                # Boutons de téléchargement
+                                col_txt, col_md, col_html = st.columns(3)
+                                
+                                with col_txt:
+                                    st.download_button(
+                                        label="📄 TXT",
+                                        data=report_content,
+                                        file_name=f"rapport_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                                        mime="text/plain",
+                                        use_container_width=True
+                                    )
+                                
+                                with col_md:
+                                    st.download_button(
+                                        label="📝 MD",
+                                        data=report_content,
+                                        file_name=f"rapport_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                                        mime="text/markdown",
+                                        use_container_width=True
+                                    )
+                                
+                                with col_html:
+                                    html_content = f"""
+                                    <!DOCTYPE html>
+                                    <html>
+                                    <head>
+                                        <meta charset="UTF-8">
+                                        <title>Rapport de Mission</title>
+                                        <style>
+                                            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 40px; line-height: 1.6; color: #333; }}
+                                            h1, h2, h3 {{ color: #2c3e50; }}
+                                            h1 {{ border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
+                                            h2 {{ border-left: 4px solid #3498db; padding-left: 15px; }}
+                                            .header {{ text-align: center; margin-bottom: 30px; background: #f8f9fa; padding: 20px; border-radius: 10px; }}
+                                            .footer {{ margin-top: 30px; text-align: center; font-size: 0.9em; color: #666; }}
+                                            ul, ol {{ margin-left: 20px; }}
+                                            strong {{ color: #2c3e50; }}
+                                        </style>
+                                    </head>
+                                    <body>
+                                        <div class="header">
+                                            <h1>Rapport de Mission</h1>
+                                            <p><strong>Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}</strong></p>
+                                            <p>Type: {report_type} | Ton: {report_tone}</p>
+                                        </div>
+                                    {report_content.replace(chr(10), '<br>')}
+                                        <div class="footer">
+                                            <p>Rapport généré automatiquement par l'IA DeepSeek</p>
+                                        </div>
+                                    </body>
+                                    </html>
+                                    """
+                                    st.download_button(
+                                        label="🌐 HTML",
+                                        data=html_content,
+                                        file_name=f"rapport_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
+                                        mime="text/html",
+                                        use_container_width=True
+                                    )
+                            
+                            else:
+                                st.error(f"❌ Erreur API: {response.status_code}")
+                                st.error(response.text)
+                        
+                        except Exception as e:
+                            st.error(f"❌ Erreur lors de la génération: {str(e)}")
+                else:
+                    st.warning("⚠️ Aucun planning disponible. Veuillez d'abord optimiser votre itinéraire.")
+            
+            with tab_details:
+                st.markdown("### 📋 Informations détaillées de la mission")
+                st.info("💡 Remplissez ces informations pour enrichir votre rapport")
+                
+                mission_data = collect_enhanced_mission_data()
+            
+            with tab_questions:
+                st.markdown("### 🤖 Questions interactives pour personnaliser le rapport")
+                st.info("💡 Répondez à ces questions pour obtenir un rapport sur mesure")
+                
+                questions_data = ask_interactive_questions()
+            
+            with tab_construction:
+                st.markdown("### 🏗️ Génération de procès-verbal de chantier")
+                st.info("💡 Créez un procès-verbal professionnel pour vos visites de chantier")
+                
+                construction_data = collect_construction_report_data()
+                
+                if st.button("📋 Générer le procès-verbal", type="primary", use_container_width=True):
+                    if st.session_state.planning_results:
+                        # Animation d'attente améliorée
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        try:
+                            # Étape 1: Collecte des données
+                            status_text.text("📋 Collecte des données de mission...")
+                            progress_bar.progress(20)
+                            time.sleep(0.3)
+                            
+                            mission_data = collect_mission_data_for_ai()
+                            questions_data = construction_data
+                            
+                            # Étape 2: Préparation du rapport
+                            status_text.text("🔧 Préparation du procès-verbal...")
+                            progress_bar.progress(40)
+                            time.sleep(0.3)
+                            
+                            # Étape 3: Génération IA
+                            status_text.text("🤖 Génération par l'IA...")
+                            progress_bar.progress(70)
+                            
+                            pv_result = generate_pv_report(mission_data, questions_data, deepseek_api_key)
+                            
+                            # Étape 4: Finalisation
+                            status_text.text("✨ Finalisation du procès-verbal...")
+                            progress_bar.progress(100)
+                            time.sleep(0.3)
+                            
+                            # Nettoyage de l'animation
+                            progress_bar.empty()
+                            status_text.empty()
+                            
+                            if pv_result["success"]:
+                                st.success("✅ Procès-verbal généré avec succès!")
+                                
+                                # Affichage du PV
+                                st.markdown("### 📋 Votre procès-verbal")
+                                st.markdown(pv_result["content"])
+                                
+                                # Informations du PV pour les téléchargements
+                                pv_structure = construction_data.get('pv_structure', 'Structure non spécifiée')
+                                pv_date = construction_data.get('pv_date', datetime.now().date())
+                                pv_site = construction_data.get('pv_site', 'Site non spécifié')
+                                pv_zone = construction_data.get('pv_zone', 'Zone non spécifiée')
+                                pv_mission_type = construction_data.get('pv_mission_type', 'Mission non spécifiée')
+                                pv_responsable = construction_data.get('pv_responsable', 'Responsable non spécifié')
+                                pv_fonction = construction_data.get('pv_fonction', 'Fonction non spécifiée')
+                                pv_content = pv_result["content"]
+                                
+                                # Boutons de téléchargement
+                                col_pv_txt, col_pv_html, col_pv_pdf, col_pv_rtf = st.columns(4)
+                                
+                                with col_pv_txt:
+                                    pv_txt_content = f"""
+PROCÈS-VERBAL DE VISITE DE CHANTIER
+
+Structure: {pv_structure}
+Date: {pv_date.strftime('%d/%m/%Y')}
+Site: {pv_site}
+Zone: {pv_zone}
+
+{pv_content}
+
+Fait à Dakar, le {datetime.now().strftime('%d/%m/%Y')}
+
+{pv_responsable}
+{pv_fonction}
+                                    """
+                                    st.download_button(
+                                        label="📄 TXT",
+                                        data=pv_txt_content.strip(),
+                                        file_name=f"PV_chantier_{pv_site.replace(' ', '_')}_{pv_date.strftime('%Y%m%d')}.txt",
+                                        mime="text/plain",
+                                        use_container_width=True
+                                    )
+                                
+                                with col_pv_html:
+                                    pv_html_content = f"""
+                                        <!DOCTYPE html>
+                                        <html>
+                                        <head>
+                                            <meta charset="UTF-8">
+                                            <title>Procès-verbal de visite de chantier</title>
+                                            <style>
+                                                body {{ font-family: 'Arial', sans-serif; margin: 40px; line-height: 1.6; color: #333; }}
+                                                .header {{ text-align: center; margin-bottom: 30px; }}
+                                                .header h1 {{ color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }}
+                                                .info-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+                                                .info-table td {{ padding: 8px; border: 1px solid #ddd; }}
+                                                .info-table .label {{ background-color: #f8f9fa; font-weight: bold; width: 120px; }}
+                                                .signature {{ margin-top: 50px; }}
+                                                .signature-line {{ border-top: 1px solid #333; width: 200px; margin: 20px 0; }}
+                                            </style>
+                                        </head>
+                                        <body>
+                                            <div class="header">
+                                                <h1>Procès-verbal de visite de chantier</h1>
+                                                <p><strong>{pv_structure}</strong></p>
+                                                <p>Travaux d'extension PA DAL zone {pv_zone}</p>
+                                            </div>
+
+                                            <table class="info-table">
+                                                <tr>
+                                                    <td class="label">DATE:</td>
+                                                    <td>{pv_date.strftime('%d/%m/%Y')}</td>
+                                                    <td class="label">SITE:</td>
+                                                    <td>{pv_site}</td>
+                                                </tr>
+                                                <tr>
+                                                    <td class="label">MISSION:</td>
+                                                    <td>{pv_mission_type}</td>
+                                                    <td class="label">ZONE:</td>
+                                                    <td>{pv_zone}</td>
+                                                </tr>
+                                                <tr>
+                                                    <td class="label">RESPONSABLE:</td>
+                                                    <td>{pv_responsable}</td>
+                                                    <td class="label">FONCTION:</td>
+                                                    <td>{pv_fonction}</td>
+                                                </tr>
+                                            </table>
+
+                                            {pv_content.replace(chr(10), '<br>')}
+
+                                        <div class="signature">
+                                            <p>Fait à Dakar, le {datetime.now().strftime('%d/%m/%Y')}</p>
+                                            <div class="signature-line"></div>
+                                            <p><strong>{pv_responsable}</strong></p>
+                                        </div>
+                                    </body>
+                                    </html>
+                                    """
+                                    st.download_button(
+                                        label="🌐 HTML",
+                                        data=pv_html_content,
+                                        file_name=f"PV_chantier_{pv_site.replace(' ', '_')}_{pv_date.strftime('%Y%m%d')}.html",
+                                        mime="text/html",
+                                        use_container_width=True
+                                    )
+                                
+                                with col_pv_pdf:
+                                    if PDF_AVAILABLE:
+                                        pv_full_content = f"""
+PROCÈS-VERBAL DE VISITE DE CHANTIER
+
+Structure: {pv_structure}
+Date: {pv_date.strftime('%d/%m/%Y')}
+Site: {pv_site}
+Zone: {pv_zone}
+Mission: {pv_mission_type}
+Responsable: {pv_responsable}
+Fonction: {pv_fonction}
+
+{pv_content}"""
+                                        pdf_data = create_pv_pdf(
+                                            content=pv_full_content,
+                                            title="Procès-verbal de visite de chantier",
+                                            author=pv_responsable
+                                        )
+                                        st.download_button(
+                                            label="📄 PDF",
+                                            data=pdf_data,
+                                            file_name=f"PV_chantier_{pv_site.replace(' ', '_')}_{pv_date.strftime('%Y%m%d')}.pdf",
+                                            mime="application/pdf",
+                                            use_container_width=True
+                                        )
+                                    else:
+                                        st.info("PDF non disponible")
+                                
+                                with col_pv_rtf:
+                                    if PDF_AVAILABLE:
+                                        rtf_data = create_word_document(
+                                            content=pv_full_content,
+                                            title="Procès-verbal de visite de chantier"
+                                        )
+                                        st.download_button(
+                                            label="📝 RTF",
+                                            data=rtf_data,
+                                            file_name=f"PV_chantier_{pv_site.replace(' ', '_')}_{pv_date.strftime('%Y%m%d')}.rtf",
+                                            mime="application/rtf",
+                                            use_container_width=True
+                                        )
+                                    else:
+                                        st.info("RTF non disponible")
+                            
+                            else:
+                                st.error(f"❌ Erreur: {pv_result['error']}")
+                        
+                        except Exception as e:
+                            st.error("❌ Erreur lors de la génération du procès-verbal")
+
+            with tab_generate:
+                st.markdown("### 🚀 Génération du rapport amélioré")
+                st.info("💡 Utilisez cette section après avoir rempli les détails et répondu aux questions")
+                
+                # Vérification des prérequis
+                has_details = hasattr(st.session_state, 'mission_context') and st.session_state.mission_context.get('objective')
+                has_questions = 'report_focus' in st.session_state
+
+                if has_details:
+                    st.success("✅ Données détaillées collectées")
+                else:
+                    st.warning("⚠️ Aucune donnée détaillée - Allez dans l'onglet 'Détails mission'")
+
+                if has_questions:
+                    st.success("✅ Questions répondues")
+                else:
+                    st.warning("⚠️ Questions non répondues - Allez dans l'onglet 'Questions IA'")
+                
+                # Aperçu des paramètres
+                if has_questions:
+                    st.markdown("**Paramètres du rapport :**")
+                    col_preview1, col_preview2 = st.columns(2)
+
+                    with col_preview1:
+                        if 'report_focus' in st.session_state:
+                            st.write(f"🎯 **Focus :** {', '.join(st.session_state.report_focus)}")
+                        if 'target_audience' in st.session_state:
+                            st.write(f"👥 **Public :** {st.session_state.target_audience}")
+
+                    with col_preview2:
+                        if 'report_length' in st.session_state:
+                            st.write(f"📄 **Longueur :** {st.session_state.report_length}")
+                        if 'specific_request' in st.session_state and st.session_state.specific_request:
+                            st.write(f"✨ **Demande spéciale :** Oui")
+                
+                # Boutons d'action
+                col_gen1, col_gen2 = st.columns([2, 1])
+
+                with col_gen1:
+                    generate_enhanced = st.button(
+                        "🚀 Générer le rapport amélioré", 
+                        type="primary", 
+                        use_container_width=True,
+                        disabled=not (has_details or has_questions)
+                    )
+
+                with col_gen2:
+                    if st.button("🔄 Réinitialiser", use_container_width=True):
+                        # Supprimer toutes les données de session liées au rapport
+                        for key in list(st.session_state.keys()):
+                            if key.startswith(('mission_', 'activity_', 'report_', 'target_', 'specific_', 'notes_', 'success_', 'contacts_', 'outcomes_', 'follow_up_', 'challenges', 'lessons_', 'recommendations', 'overall_', 'highlight_', 'discuss_', 'future_', 'cost_', 'time_', 'stakeholder_', 'include_')):
+                                del st.session_state[key]
+                        st.rerun()
+
+                if generate_enhanced:
+                    if st.session_state.planning_results:
+                        # Animation d'attente améliorée avec barre de progression
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        
+                        try:
+                            status_text.text("🔄 Collecte des données de mission...")
+                            progress_bar.progress(15)
+                            mission_data = collect_mission_data_for_ai()
+                            
+                            status_text.text("📋 Préparation des questions...")
+                            progress_bar.progress(30)
+                            time.sleep(0.5)
+                            
+                            questions_data = {
+                                'report_focus': st.session_state.get('report_focus', []),
+                                'target_audience': st.session_state.get('target_audience', 'Direction générale'),
+                                'report_length': st.session_state.get('report_length', 'Moyen (3-5 pages)'),
+                                'include_metrics': st.session_state.get('include_metrics', True),
+                                'highlight_successes': st.session_state.get('highlight_successes', True),
+                                'discuss_challenges': st.session_state.get('discuss_challenges', True),
+                                'future_planning': st.session_state.get('future_planning', True),
+                                'cost_analysis': st.session_state.get('cost_analysis', False),
+                                'time_efficiency': st.session_state.get('time_efficiency', True),
+                                'stakeholder_feedback': st.session_state.get('stakeholder_feedback', False),
+                                'specific_request': st.session_state.get('specific_request', '')
+                            }
+                            
+                            # Étape 3: Construction du prompt
+                            status_text.text("🔧 Construction du prompt personnalisé...")
+                            progress_bar.progress(50)
+                            time.sleep(0.5)
+                            
+                            # Étape 4: Génération IA
+                            status_text.text("🤖 Génération du rapport par l'IA...")
+                            progress_bar.progress(70)
+                            
+                            # Génération du rapport
+                            report_result = generate_enhanced_ai_report(
+                                mission_data, 
+                                questions_data,
+                                deepseek_api_key
+                            )
+                            
+                            # Étape 5: Finalisation
+                            status_text.text("✨ Finalisation du rapport...")
+                            progress_bar.progress(100)
+                            time.sleep(0.3)
+                            
+                            # Nettoyage de l'animation
+                            progress_bar.empty()
+                            status_text.empty()
+                            
+                            if report_result["success"]:
+                                st.success("✅ Rapport amélioré généré avec succès!")
+                                
+                                # Affichage du rapport
+                                st.markdown("### 📄 Votre rapport amélioré")
+                                report_content = report_result["content"]
+                                st.markdown(report_content)
+                                
+                                # Boutons de téléchargement
+                                col_txt, col_md, col_html, col_copy = st.columns(4)
+                                
+                                with col_txt:
+                                    st.download_button(
+                                        label="📄 TXT",
+                                        data=report_content,
+                                        file_name=f"rapport_ameliore_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                                        mime="text/plain",
+                                        use_container_width=True
+                                    )
+                                
+                                with col_md:
+                                    st.download_button(
+                                        label="📝 MD",
+                                        data=report_content,
+                                        file_name=f"rapport_ameliore_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                                        mime="text/markdown",
+                                        use_container_width=True
+                                    )
+                                
+                                with col_html:
+                                    html_content = f"""
+                                    <!DOCTYPE html>
+                                    <html>
+                                    <head>
+                                        <meta charset="UTF-8">
+                                        <title>Rapport de Mission Amélioré</title>
+                                        <style>
+                                            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 40px; line-height: 1.6; color: #333; }}
+                                            h1, h2, h3 {{ color: #2c3e50; }}
+                                            h1 {{ border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
+                                            h2 {{ border-left: 4px solid #3498db; padding-left: 15px; }}
+                                            .header {{ text-align: center; margin-bottom: 30px; background: #f8f9fa; padding: 20px; border-radius: 10px; }}
+                                            .footer {{ margin-top: 30px; text-align: center; font-size: 0.9em; color: #666; }}
+                                            ul, ol {{ margin-left: 20px; }}
+                                            strong {{ color: #2c3e50; }}
+                                        </style>
+                                    </head>
+                                    <body>
+                                        <div class="header">
+                                            <h1>Rapport de Mission Amélioré</h1>
+                                            <p><strong>Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}</strong></p>
+                                            <p>Public cible: {questions_data.get('target_audience', 'Non spécifié')}</p>
+                                        </div>
+                                        {report_content.replace(chr(10), '<br>')}
+                                        <div class="footer">
+                                            <p>Rapport généré automatiquement par l'IA DeepSeek</p>
+                                        </div>
+                                    </body>
+                                    </html>
+                                    """
+                                    st.download_button(
+                                        label="🌐 HTML",
+                                        data=html_content,
+                                        file_name=f"rapport_ameliore_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
+                                        mime="text/html",
+                                        use_container_width=True
+                                    )
+                                
+                                with col_copy:
+                                    st.code(report_content, language=None)
+                            
+                            else:
+                                st.error(f"❌ Erreur: {report_result['error']}")
+                        
+                        except Exception as e:
+                            st.error(f"❌ Erreur lors de la génération: {str(e)}")
+                    else:
+                        st.warning("⚠️ Aucun planning disponible. Veuillez d'abord optimiser votre itinéraire.")
+
 # --------------------------
-# MODULE RAPPORT IA AMÉLIORÉ
+# MODULE RAPPORT IA AMÉLIORÉ (ANCIEN - À SUPPRIMER)
 # --------------------------
-if st.session_state.planning_results:
+if False and st.session_state.planning_results:
     st.markdown("---")
     st.header("📋 Génération de rapport de mission")
     
@@ -3696,12 +4879,27 @@ if st.session_state.planning_results:
                 if not deepseek_api_key:
                     st.error("❌ Clé API DeepSeek manquante")
                 else:
-                    with st.spinner("🤖 Génération du rapport en cours..."):
-                        # Collecte des données de mission
-                        mission_data = collect_mission_data_for_ai()
-                        
-                        # Génération selon le type de rapport sélectionné
-                        if report_type == "Procès-verbal professionnel":
+                    # Animation améliorée avec barre de progression
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    # Étape 1: Collecte des données
+                    status_text.text("📋 Collecte des données de mission...")
+                    progress_bar.progress(20)
+                    mission_data = collect_mission_data_for_ai()
+                    
+                    # Étape 2: Préparation du prompt
+                    status_text.text("🔧 Construction du prompt IA...")
+                    progress_bar.progress(40)
+                    time.sleep(0.5)
+                    
+                    # Étape 3: Génération IA
+                    status_text.text("🤖 Génération du rapport par l'IA...")
+                    progress_bar.progress(70)
+                    time.sleep(0.3)
+                    
+                    # Génération selon le type de rapport sélectionné
+                    if report_type == "Procès-verbal professionnel":
                             # Génération du procès-verbal avec l'IA
                             questions_data_pv = {
                                 'context': custom_context,
@@ -3817,10 +5015,10 @@ if st.session_state.planning_results:
                                 
                                 with col_pdf:
                                     st.info("💡 Ouvrez le fichier HTML dans votre navigateur et utilisez 'Imprimer > Enregistrer au format PDF' pour obtenir un PDF professionnel.")
-                        else:
-                            # Génération du rapport basique (utilisation de l'ancienne fonction)
-                            # Pour le rapport basique, on utilise une version simplifiée
-                            questions_data_simple = {
+                    else:
+                        # Génération du rapport basique (utilisation de l'ancienne fonction)
+                        # Pour le rapport basique, on utilise une version simplifiée
+                        questions_data_simple = {
                                 'report_focus': report_type,
                                 'target_audience': 'Équipe',
                                 'report_length': 'Moyen',
@@ -3836,6 +5034,15 @@ if st.session_state.planning_results:
                             questions_data_simple,
                             deepseek_api_key
                         )
+                        
+                        # Étape 4: Finalisation
+                        status_text.text("✅ Finalisation du rapport...")
+                        progress_bar.progress(100)
+                        time.sleep(0.3)
+                        
+                        # Nettoyage des éléments d'animation
+                        progress_bar.empty()
+                        status_text.empty()
                         
                         if report_content:
                             st.success("✅ Rapport généré avec succès!")
@@ -3903,7 +5110,7 @@ if st.session_state.planning_results:
                             # Deuxième ligne : formats professionnels (PDF et Word)
                             if PDF_AVAILABLE:
                                 st.markdown("#### 📋 Formats professionnels")
-                                col_pdf, col_word = st.columns(2)
+                                col_pdf, col_word_rtf, col_word_docx = st.columns(3)
                                 
                                 with col_pdf:
                                     try:
@@ -3922,22 +5129,38 @@ if st.session_state.planning_results:
                                     except Exception as e:
                                         st.error(f"Erreur génération PDF: {str(e)}")
                                 
-                                with col_word:
+                                with col_word_rtf:
                                     try:
                                         word_data = create_word_document(
                                             content=report_content,
                                             title="Rapport de Mission"
                                         )
                                         st.download_button(
-                                            label="📝 Télécharger Word (RTF)",
+                                            label="📝 Word (RTF)",
                                             data=word_data,
                                             file_name=f"rapport_mission_{datetime.now().strftime('%Y%m%d_%H%M')}.rtf",
                                             mime="application/rtf",
                                             use_container_width=True
                                         )
                                     except Exception as e:
-                                        st.error(f"Erreur génération Word: {str(e)}")
-                            else:
+                                        st.error(f"Erreur génération Word RTF: {str(e)}")
+                                
+                                with col_word_docx:
+                                    try:
+                                        docx_data = create_docx_document(
+                                            content=report_content,
+                                            title="Rapport de Mission"
+                                        )
+                                        st.download_button(
+                                            label="📄 Word (.docx)",
+                                            data=docx_data,
+                                            file_name=f"rapport_mission_{datetime.now().strftime('%Y%m%d_%H%M')}.docx",
+                                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                            use_container_width=True
+                                        )
+                                    except Exception as e:
+                                        st.error(f"Erreur génération Word DOCX: {str(e)}")
+                            if not PDF_AVAILABLE:
                                 st.info("💡 Installez reportlab pour activer l'export PDF et Word professionnel.")
                         else:
                             st.error("❌ Erreur lors de la génération du rapport")
@@ -4051,7 +5274,16 @@ if st.session_state.planning_results:
                 elif not pv_site or not pv_objectifs:
                     st.error("❌ Veuillez remplir au minimum le site et les objectifs")
                 else:
-                    with st.spinner("🤖 Génération du procès-verbal en cours..."):
+                    # Animation d'attente améliorée
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    try:
+                        # Étape 1: Collecte des données
+                        status_text.text("📋 Collecte des informations du chantier...")
+                        progress_bar.progress(15)
+                        time.sleep(0.3)
+                        
                         # Données pour le procès-verbal
                         pv_data = {
                             'date': pv_date.strftime('%d/%m/%Y'),
@@ -4074,8 +5306,26 @@ if st.session_state.planning_results:
                             'participants': pv_participants
                         }
                         
+                        # Mise à jour de l'animation - Préparation du rapport
+                        progress_bar.progress(45)
+                        status_text.text("📝 Préparation du rapport de chantier...")
+                        time.sleep(0.5)
+                        
+                        # Mise à jour de l'animation - Génération IA
+                        progress_bar.progress(70)
+                        status_text.text("🤖 Génération du rapport avec l'IA...")
+                        
                         # Génération avec l'IA
                         pv_content = generate_construction_report(pv_data, deepseek_api_key)
+                        
+                        # Mise à jour de l'animation - Finalisation
+                        progress_bar.progress(100)
+                        status_text.text("✅ Rapport généré avec succès!")
+                        time.sleep(0.5)
+                        
+                        # Nettoyage de l'animation
+                        progress_bar.empty()
+                        status_text.empty()
                         
                         if pv_content:
                             st.success("✅ Procès-verbal généré avec succès!")
@@ -4241,7 +5491,7 @@ if st.session_state.planning_results:
                             # Deuxième ligne : formats professionnels (PDF et Word)
                             if PDF_AVAILABLE:
                                 st.markdown("#### 📋 Formats professionnels")
-                                col_pv_pdf, col_pv_rtf = st.columns(2)
+                                col_pv_pdf, col_pv_rtf, col_pv_docx = st.columns(3)
                                 
                                 with col_pv_pdf:
                                     try:
@@ -4262,7 +5512,7 @@ Fonction: {pv_fonction}
                                             author=pv_responsable
                                         )
                                         st.download_button(
-                                            label="📄 Télécharger PDF",
+                                            label="📄 PDF",
                                             data=pdf_data,
                                             file_name=f"PV_chantier_{pv_site.replace(' ', '_')}_{pv_date.strftime('%Y%m%d')}.pdf",
                                             mime="application/pdf",
@@ -4278,18 +5528,40 @@ Fonction: {pv_fonction}
                                             title="Procès-verbal de visite de chantier"
                                         )
                                         st.download_button(
-                                            label="📝 Télécharger Word (RTF)",
+                                            label="📝 Word (RTF)",
                                             data=rtf_data,
                                             file_name=f"PV_chantier_{pv_site.replace(' ', '_')}_{pv_date.strftime('%Y%m%d')}.rtf",
                                             mime="application/rtf",
                                             use_container_width=True
                                         )
                                     except Exception as e:
-                                        st.error(f"Erreur génération Word: {str(e)}")
+                                        st.error(f"Erreur génération Word RTF: {str(e)}")
+                                
+                                with col_pv_docx:
+                                    try:
+                                        docx_data = create_docx_document(
+                                            content=pv_full_content,
+                                            title="Procès-verbal de visite de chantier"
+                                        )
+                                        st.download_button(
+                                            label="📄 Word (.docx)",
+                                            data=docx_data,
+                                            file_name=f"PV_chantier_{pv_site.replace(' ', '_')}_{pv_date.strftime('%Y%m%d')}.docx",
+                                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                            use_container_width=True
+                                        )
+                                    except Exception as e:
+                                        st.error(f"Erreur génération Word DOCX: {str(e)}")
                             else:
                                 st.info("💡 Installez reportlab pour activer l'export PDF et Word professionnel.")
-                        else:
-                            st.error("❌ Erreur lors de la génération du procès-verbal")
+
+                    except Exception as e:
+                        st.error(f"❌ Erreur lors de la génération du procès-verbal: {str(e)}")
+                        try:
+                            progress_bar.empty()
+                            status_text.empty()
+                        except Exception:
+                            pass
 
         with tab_generate:
             st.markdown("### 🚀 Génération du rapport amélioré")
@@ -4349,33 +5621,59 @@ Fonction: {pv_fonction}
                 if not deepseek_api_key:
                     st.error("❌ Clé API DeepSeek manquante")
                 else:
-                    with st.spinner("🤖 Génération du rapport amélioré en cours..."):
-                        # Collecte des données de mission
-                        mission_data = collect_mission_data_for_ai()
-                        
-                        # Collecte des réponses aux questions
-                        questions_data = {
-                            'report_focus': st.session_state.get('report_focus', []),
-                            'target_audience': st.session_state.get('target_audience', 'Direction générale'),
-                            'report_length': st.session_state.get('report_length', 'Moyen (3-5 pages)'),
-                            'include_metrics': st.session_state.get('include_metrics', True),
-                            'highlight_successes': st.session_state.get('highlight_successes', True),
-                            'discuss_challenges': st.session_state.get('discuss_challenges', True),
-                            'future_planning': st.session_state.get('future_planning', True),
-                            'cost_analysis': st.session_state.get('cost_analysis', False),
-                            'time_efficiency': st.session_state.get('time_efficiency', True),
-                            'stakeholder_feedback': st.session_state.get('stakeholder_feedback', False),
-                            'specific_request': st.session_state.get('specific_request', '')
-                        }
-                        
-                        # Génération du rapport amélioré
-                        report_content = generate_enhanced_ai_report(
-                            mission_data, 
-                            questions_data,
-                            deepseek_api_key
+                    # Initialisation de l'animation d'attente
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    # Étape 1: Collecte des données de mission
+                    status_text.text("📋 Collecte des données de mission...")
+                    progress_bar.progress(20)
+                    time.sleep(0.5)
+                    mission_data = collect_mission_data_for_ai()
+                    
+                    # Étape 2: Collecte des réponses aux questions
+                    status_text.text("❓ Collecte des réponses aux questions...")
+                    progress_bar.progress(40)
+                    time.sleep(0.5)
+                    questions_data = {
+                        'report_focus': st.session_state.get('report_focus', []),
+                        'target_audience': st.session_state.get('target_audience', 'Direction générale'),
+                        'report_length': st.session_state.get('report_length', 'Moyen (3-5 pages)'),
+                        'include_metrics': st.session_state.get('include_metrics', True),
+                        'highlight_successes': st.session_state.get('highlight_successes', True),
+                        'discuss_challenges': st.session_state.get('discuss_challenges', True),
+                        'future_planning': st.session_state.get('future_planning', True),
+                        'cost_analysis': st.session_state.get('cost_analysis', False),
+                        'time_efficiency': st.session_state.get('time_efficiency', True),
+                        'stakeholder_feedback': st.session_state.get('stakeholder_feedback', False),
+                        'specific_request': st.session_state.get('specific_request', '')
+                    }
+                    
+                    # Étape 3: Construction du prompt
+                    status_text.text("🔧 Construction du prompt personnalisé...")
+                    progress_bar.progress(60)
+                    time.sleep(0.5)
+                    
+                    # Étape 4: Génération du rapport amélioré
+                    status_text.text("🤖 Génération du rapport amélioré par l'IA...")
+                    progress_bar.progress(80)
+                    time.sleep(0.5)
+                    report_content = generate_enhanced_ai_report(
+                        mission_data, 
+                        questions_data,
+                        deepseek_api_key
                         )
                         
-                        if report_content:
+                    # Étape 5: Finalisation
+                    status_text.text("✅ Finalisation du rapport...")
+                    progress_bar.progress(100)
+                    time.sleep(0.5)
+                    
+                    # Nettoyage de l'animation
+                    progress_bar.empty()
+                    status_text.empty()
+                        
+                    if report_content:
                             st.success("✅ Rapport amélioré généré avec succès!")
                             
                             # Affichage du rapport
@@ -4449,8 +5747,8 @@ Fonction: {pv_fonction}
                                 if st.button("📋 Copier", use_container_width=True):
                                     st.write("📋 Contenu copié dans le presse-papiers!")
                                     st.code(report_content, language=None)
-                        else:
-                            st.error("❌ Erreur lors de la génération du rapport")
+                    else:
+                        st.error("❌ Erreur lors de la génération du rapport")
 
 st.markdown("---")
 st.caption("🚀 Planificateur de Mission v2.4")
