@@ -2520,13 +2520,13 @@ with tab1:
                                 subcol1, subcol2 = st.columns(2)
                                 with subcol1:
                                     if i > 0:
-                                        if st.button("⬆️", key=f"up_{i}", help="Monter", use_container_width=True):
+                                        if st.button("⬆️", key=f"manual_up_{i}", help="Monter", use_container_width=True):
                                             st.session_state.manual_order[i], st.session_state.manual_order[i-1] = \
                                                 st.session_state.manual_order[i-1], st.session_state.manual_order[i]
                                             st.rerun()
                                 with subcol2:
                                     if i < len(st.session_state.manual_order) - 1:
-                                        if st.button("⬇️", key=f"down_{i}", help="Descendre", use_container_width=True):
+                                        if st.button("⬇️", key=f"manual_down_{i}", help="Descendre", use_container_width=True):
                                             st.session_state.manual_order[i], st.session_state.manual_order[i+1] = \
                                                 st.session_state.manual_order[i+1], st.session_state.manual_order[i]
                                             st.rerun()
@@ -4012,14 +4012,14 @@ if st.session_state.planning_results:
                             st.write(f"**{i+1}.** {site['Ville']} - {site.get('Type', 'Site')} - {site.get('Activité', 'Activité')}")
                         
                         with col2:
-                            if i > 0 and st.button("⬆️", key=f"up_{i}", help="Monter"):
+                            if i > 0 and st.button("⬆️", key=f"enhanced_up_{i}", help="Monter"):
                                 # Échanger avec l'élément précédent
                                 st.session_state.manual_order[i], st.session_state.manual_order[i-1] = \
                                     st.session_state.manual_order[i-1], st.session_state.manual_order[i]
                                 st.rerun()
                         
                         with col3:
-                            if i < len(st.session_state.manual_order) - 1 and st.button("⬇️", key=f"down_{i}", help="Descendre"):
+                            if i < len(st.session_state.manual_order) - 1 and st.button("⬇️", key=f"enhanced_down_{i}", help="Descendre"):
                                 # Échanger avec l'élément suivant
                                 st.session_state.manual_order[i], st.session_state.manual_order[i+1] = \
                                     st.session_state.manual_order[i+1], st.session_state.manual_order[i]
