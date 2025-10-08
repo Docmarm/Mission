@@ -162,10 +162,10 @@ def estimate_fuel_cost(fuel_consumption_data, fuel_price_per_liter=None):
     }
 
 # --------------------------
-# FONCTIONS RAPPORT IA
+# FONCTIONS RAPPORT IA ADJA
 # --------------------------
 def collect_mission_data_for_ai():
-    """Collecte toutes les données de mission pour l'IA"""
+    """Collecte toutes les données de mission pour l'IA Adja"""
     if not st.session_state.planning_results:
         return None
     
@@ -795,7 +795,7 @@ def ask_interactive_questions():
     return questions_data
 
 def generate_enhanced_ai_report(mission_data, questions_data, api_key):
-    """Génère un rapport de mission amélioré via l'IA DeepSeek"""
+    """Génère un rapport de mission amélioré via l'IA Adja DeepSeek"""
     try:
         # Construction du prompt amélioré
         prompt = build_enhanced_report_prompt(mission_data, questions_data)
@@ -1014,7 +1014,7 @@ Utilise un style {tone.lower()} et structure le rapport avec des titres clairs e
     return prompt
 
 def generate_pv_report(mission_data, questions_data, deepseek_api_key):
-    """Génère un rapport au format procès-verbal professionnel avec l'IA DeepSeek"""
+    """Génère un rapport au format procès-verbal professionnel avec l'IA Adja DeepSeek"""
     
     if not deepseek_api_key:
         return None, "Clé API DeepSeek manquante"
@@ -1449,7 +1449,7 @@ def haversine_fallback_matrix(coords, kmh=95.0):
 
 def optimize_route_with_ai(sites, coords, base_location=None, api_key=None):
     """
-    Optimise l'ordre des sites en utilisant l'IA DeepSeek
+    Optimise l'ordre des sites en utilisant l'IA Adja DeepSeek
     
     Args:
         sites: Liste des sites avec leurs informations
@@ -1464,7 +1464,7 @@ def optimize_route_with_ai(sites, coords, base_location=None, api_key=None):
         return list(range(len(sites))), False, "Clé API DeepSeek manquante"
     
     try:
-        # Préparer les données des sites pour l'IA
+        # Préparer les données des sites pour l'IA Adja
         sites_info = []
         for i, site in enumerate(sites):
             site_data = {
@@ -1477,7 +1477,7 @@ def optimize_route_with_ai(sites, coords, base_location=None, api_key=None):
             }
             sites_info.append(site_data)
         
-        # Construire le prompt pour l'IA
+        # Construire le prompt pour l'IA Adja
         prompt = f"""Tu es un expert en optimisation d'itinéraires au Sénégal. 
 
 MISSION: Optimise l'ordre de visite des sites suivants pour minimiser le temps de trajet total.
@@ -1531,7 +1531,7 @@ Ne fournis AUCUNE explication, juste la séquence d'indices."""
             result = response.json()
             ai_response = result["choices"][0]["message"]["content"].strip()
             
-            # Parser la réponse de l'IA
+            # Parser la réponse de l'IA Adja
             try:
                 # Extraire les indices de la réponse
                 indices_str = ai_response.split('\n')[0].strip()
@@ -1539,13 +1539,13 @@ Ne fournis AUCUNE explication, juste la séquence d'indices."""
                 
                 # Vérifier que tous les indices sont valides
                 if len(indices) == len(sites) and set(indices) == set(range(len(sites))):
-                    return indices, True, "Optimisation IA réussie"
+                    return indices, True, "Optimisation IA Adja réussie"
                 else:
-                    # Fallback: ordre original si la réponse IA est invalide
-                    return list(range(len(sites))), False, f"Réponse IA invalide: {ai_response[:100]}..."
+                    # Fallback: ordre original si la réponse IA Adja est invalide
+                    return list(range(len(sites))), False, f"Réponse IA Adja invalide: {ai_response[:100]}..."
                     
             except (ValueError, IndexError) as e:
-                return list(range(len(sites))), False, f"Erreur parsing réponse IA: {str(e)}"
+                return list(range(len(sites))), False, f"Erreur parsing réponse IA Adja: {str(e)}"
         
         else:
             return list(range(len(sites))), False, f"Erreur API DeepSeek: {response.status_code}"
@@ -2963,9 +2963,9 @@ if plan_button:
         
         st.success("✅ Ordre manuel appliqué")
     else:
-        # Utiliser l'optimisation IA au lieu du TSP traditionnel
+        # Utiliser l'optimisation IA Adja au lieu du TSP traditionnel
         if len(coords) >= 3:
-            # Essayer d'abord l'optimisation IA
+            # Essayer d'abord l'optimisation IA Adja
             ai_order, ai_success, ai_message = optimize_route_with_ai(
                 all_sites, coords, 
                 base_location if use_base_location else None, 
@@ -2974,11 +2974,11 @@ if plan_button:
             
             if ai_success:
                 order = ai_order
-                st.success(f"✅ Ordre optimisé par IA: {ai_message}")
+                st.success(f"✅ Ordre optimisé par IA Adja: {ai_message}")
             else:
-                # Fallback vers TSP si l'IA échoue
+                # Fallback vers TSP si l'IA Adja échoue
                 order = solve_tsp_fixed_start_end(durations_sec)
-                st.warning(f"⚠️ IA échouée ({ai_message}), utilisation TSP classique")
+                st.warning(f"⚠️ IA Adja échouée ({ai_message}), utilisation TSP classique")
         else:
             order = list(range(len(coords)))
             st.success("✅ Ordre séquentiel (moins de 3 sites)")
@@ -4108,22 +4108,22 @@ if st.session_state.planning_results:
             
             with col3:
                 if st.button("🎯 Optimiser automatiquement", use_container_width=True):
-                    # Réoptimiser avec IA
+                    # Réoptimiser avec IA Adja
                     try:
                         ai_order, ai_success, ai_message = optimize_route_with_ai(sites_ordered, coords_ordered, base_location, deepseek_api_key)
                         if ai_success and isinstance(ai_order, list):
                             st.session_state.manual_order = ai_order
-                            st.success(f"Ordre optimisé automatiquement par IA! {ai_message}")
+                            st.success(f"Ordre optimisé automatiquement par IA Adja! {ai_message}")
                         else:
-                            # Fallback vers TSP si l'IA échoue ou réponse invalide
+                            # Fallback vers TSP si l'IA Adja échoue ou réponse invalide
                             optimized_order = solve_tsp_fixed_start_end(durations_matrix)
                             st.session_state.manual_order = optimized_order
-                            st.warning(f"IA indisponible ou réponse invalide, optimisation TSP utilisée. {ai_message if not ai_success else ''}")
+                            st.warning(f"IA Adja indisponible ou réponse invalide, optimisation TSP utilisée. {ai_message if not ai_success else ''}")
                     except Exception as e:
                         # Fallback vers TSP en cas d'erreur
                         optimized_order = solve_tsp_fixed_start_end(durations_matrix)
                         st.session_state.manual_order = optimized_order
-                        st.warning(f"Erreur IA ({str(e)[:50]}...), optimisation TSP utilisée.")
+                        st.warning(f"Erreur IA Adja ({str(e)[:50]}...), optimisation TSP utilisée.")
                     st.rerun()
     
     with tab_map:
@@ -4256,11 +4256,11 @@ if st.session_state.planning_results:
         st.subheader("📋 Génération de rapport de mission")
         
         with st.expander("🤖 Générer un rapport complet", expanded=False):
-            st.markdown("**Utilisez l'IA pour générer un rapport professionnel orienté activités**")
+            st.markdown("**Utilisez l'IA Adja pour générer un rapport professionnel orienté activités**")
             
             # Onglets pour organiser l'interface
             tab_basic, tab_details, tab_questions, tab_construction, tab_generate = st.tabs([
-                "📝 Rapport basique", "📋 Détails mission", "🤖 Questions IA", "🏗️ Procès-verbal", "🚀 Génération"
+                "📝 Rapport basique", "📋 Détails mission", "🤖 Questions IA Adja", "🏗️ Procès-verbal", "🚀 Génération"
             ])
             
             with tab_basic:
@@ -4321,7 +4321,7 @@ if st.session_state.planning_results:
                                 include_costs, include_timeline, custom_context
                             )
                             
-                            status_text.text("🤖 Génération du rapport par l'IA...")
+                            status_text.text("🤖 Génération du rapport par l'IA Adja...")
                             progress_bar.progress(60)
                             response = requests.post(
                                 "https://api.deepseek.com/v1/chat/completions",
@@ -4400,7 +4400,7 @@ if st.session_state.planning_results:
                                         </div>
                                     {report_content.replace(chr(10), '<br>')}
                                         <div class="footer">
-                                            <p>Rapport généré automatiquement par l'IA DeepSeek</p>
+                                            <p>Rapport généré automatiquement par l'IA Adja DeepSeek</p>
                                         </div>
                                     </body>
                                     </html>
@@ -4460,8 +4460,8 @@ if st.session_state.planning_results:
                             progress_bar.progress(40)
                             time.sleep(0.3)
                             
-                            # Étape 3: Génération IA
-                            status_text.text("🤖 Génération par l'IA...")
+                            # Étape 3: Génération IA Adja Adja
+                            status_text.text("🤖 Génération par l'IA Adja...")
                             progress_bar.progress(70)
                             
                             pv_result = generate_pv_report(mission_data, questions_data, deepseek_api_key)
@@ -4650,7 +4650,7 @@ Fonction: {pv_fonction}
                 if has_questions:
                     st.success("✅ Questions répondues")
                 else:
-                    st.warning("⚠️ Questions non répondues - Allez dans l'onglet 'Questions IA'")
+                    st.warning("⚠️ Questions non répondues - Allez dans l'onglet 'Questions IA Adja'")
                 
                 # Aperçu des paramètres
                 if has_questions:
@@ -4722,8 +4722,8 @@ Fonction: {pv_fonction}
                             progress_bar.progress(50)
                             time.sleep(0.5)
                             
-                            # Étape 4: Génération IA
-                            status_text.text("🤖 Génération du rapport par l'IA...")
+                            # Étape 4: Génération IA Adja
+                            status_text.text("🤖 Génération du rapport par l'IA Adja...")
                             progress_bar.progress(70)
                             
                             # Génération du rapport
@@ -4797,7 +4797,7 @@ Fonction: {pv_fonction}
                                         </div>
                                         {report_content.replace(chr(10), '<br>')}
                                         <div class="footer">
-                                            <p>Rapport généré automatiquement par l'IA DeepSeek</p>
+                                            <p>Rapport généré automatiquement par l'IA Adja DeepSeek</p>
                                         </div>
                                     </body>
                                     </html>
@@ -4822,18 +4822,18 @@ Fonction: {pv_fonction}
                         st.warning("⚠️ Aucun planning disponible. Veuillez d'abord optimiser votre itinéraire.")
 
 # --------------------------
-# MODULE RAPPORT IA AMÉLIORÉ (ANCIEN - À SUPPRIMER)
+# MODULE RAPPORT IA ADJA AMÉLIORÉ (ANCIEN - À SUPPRIMER)
 # --------------------------
 if False and st.session_state.planning_results:
     st.markdown("---")
     st.header("📋 Génération de rapport de mission")
     
     with st.expander("🤖 Générer un rapport complet", expanded=False):
-        st.markdown("**Utilisez l'IA pour générer un rapport professionnel orienté activités**")
+        st.markdown("**Utilisez l'IA Adja pour générer un rapport professionnel orienté activités**")
         
         # Onglets pour organiser l'interface
         tab_basic, tab_details, tab_questions, tab_construction, tab_generate = st.tabs([
-            "📝 Rapport basique", "📋 Détails mission", "🤖 Questions IA", "🏗️ Procès-verbal", "🚀 Génération"
+            "📝 Rapport basique", "📋 Détails mission", "🤖 Questions IA Adja", "🏗️ Procès-verbal", "🚀 Génération"
         ])
         
         with tab_basic:
@@ -4889,18 +4889,18 @@ if False and st.session_state.planning_results:
                     mission_data = collect_mission_data_for_ai()
                     
                     # Étape 2: Préparation du prompt
-                    status_text.text("🔧 Construction du prompt IA...")
+                    status_text.text("🤖 Construction du prompt IA Adja...")
                     progress_bar.progress(40)
                     time.sleep(0.5)
                     
-                    # Étape 3: Génération IA
-                    status_text.text("🤖 Génération du rapport par l'IA...")
+                    # Étape 3: Génération IA Adja
+                    status_text.text("🤖 Génération du rapport par l'IA Adja...")
                     progress_bar.progress(70)
                     time.sleep(0.3)
                     
                     # Génération selon le type de rapport sélectionné
                     if report_type == "Procès-verbal professionnel":
-                            # Génération du procès-verbal avec l'IA
+                            # Génération du procès-verbal avec l'IA Adja
                             questions_data_pv = {
                                 'context': custom_context,
                                 'observations': 'Observations détaillées de la mission',
@@ -5174,7 +5174,7 @@ if False and st.session_state.planning_results:
         
         with tab_questions:
             st.markdown("### 🤖 Questions pour personnaliser le rapport")
-            st.info("💡 Répondez à ces questions pour que l'IA génère un rapport adapté à vos besoins")
+            st.info("💡 Répondez à ces questions pour que l'IA Adja génère un rapport adapté à vos besoins")
             
             # Interface de questions interactives
             questions_data = ask_interactive_questions()
@@ -5311,11 +5311,11 @@ if False and st.session_state.planning_results:
                         status_text.text("📝 Préparation du rapport de chantier...")
                         time.sleep(0.5)
                         
-                        # Mise à jour de l'animation - Génération IA
+                        # Mise à jour de l'animation - Génération IA Adja
                         progress_bar.progress(70)
-                        status_text.text("🤖 Génération du rapport avec l'IA...")
+                        status_text.text("🤖 Génération du rapport avec l'IA Adja...")
                         
-                        # Génération avec l'IA
+                        # Génération avec l'IA Adja
                         pv_content = generate_construction_report(pv_data, deepseek_api_key)
                         
                         # Mise à jour de l'animation - Finalisation
@@ -5579,7 +5579,7 @@ Fonction: {pv_fonction}
             if has_questions:
                 st.success("✅ Questions répondues")
             else:
-                st.warning("⚠️ Questions non répondues - Allez dans l'onglet 'Questions IA'")
+                st.warning("⚠️ Questions non répondues - Allez dans l'onglet 'Questions IA Adja'")
             
             # Aperçu des paramètres
             if has_questions:
@@ -5655,7 +5655,7 @@ Fonction: {pv_fonction}
                     time.sleep(0.5)
                     
                     # Étape 4: Génération du rapport amélioré
-                    status_text.text("🤖 Génération du rapport amélioré par l'IA...")
+                    status_text.text("🤖 Génération du rapport amélioré par l'IA Adja...")
                     progress_bar.progress(80)
                     time.sleep(0.5)
                     report_content = generate_enhanced_ai_report(
@@ -5729,7 +5729,7 @@ Fonction: {pv_fonction}
                                     </div>
                                     {report_content.replace(chr(10), '<br>')}
                                     <div class="footer">
-                                        <p>Rapport généré automatiquement par l'IA DeepSeek</p>
+                                        <p>Rapport généré automatiquement par l'IA Adja DeepSeek</p>
                                     </div>
                                 </body>
                                 </html>
