@@ -1339,7 +1339,7 @@ def two_opt_fixed_start_end(path, matrix):
                 break
     return path
 
-def haversine_fallback_matrix(coords, kmh=60.0):
+def haversine_fallback_matrix(coords, kmh=95.0):
     """Calcule une matrice basée sur distances géodésiques"""
     from math import radians, sin, cos, sqrt, atan2
     
@@ -1757,7 +1757,7 @@ def build_professional_html(itinerary, start_date, stats, sites_ordered, segment
     def fmt_time(dt):
         return dt.strftime("%Hh%M")
     
-    def extract_distance_from_desc(desc):
+    def extract_distance_from_desc(desc, speed_kmh_param):
         import re
         # Chercher d'abord le format avec temps réel : "(123.4 km, 2h30)"
         m_with_time = re.search(r"\(([\d\.]+)\s*km,\s*([^)]+)\)", desc)
@@ -1770,7 +1770,7 @@ def build_professional_html(itinerary, start_date, stats, sites_ordered, segment
         m = re.search(r"\(([\d\.]+)\s*km\)", desc)
         if m:
             km = float(m.group(1))
-            hours = km / speed_kmh
+            hours = km / speed_kmh_param
             h = int(hours)
             minutes = int((hours - h) * 60)
             if h > 0:
@@ -1889,7 +1889,7 @@ def build_professional_html(itinerary, start_date, stats, sites_ordered, segment
             if "→" in desc and "🚗" in desc:
                 activity_class = "route"
                 activity_text = desc.replace("🚗 ", "🚗 ")
-                transport_info = extract_distance_from_desc(desc)
+                transport_info = extract_distance_from_desc(desc, speed_kmh)
             elif any(word in desc.upper() for word in ["VISITE", "AGENCE", "SITE", "CLIENT"]):
                 activity_class = "mission"
                 activity_text = desc.replace("🏢", "").replace("👥", "").replace("📍", "").replace("🏠", "").strip()
@@ -2700,6 +2700,7 @@ if plan_button:
         if result:
             durations_sec, distances_m = result
             calculation_method = "Automatique"
+            st.info(f"📊 Méthode: {calculation_method}")
         else:
             st.error(f"❌ {error_msg}")
             st.stop()
@@ -2707,6 +2708,7 @@ if plan_button:
     elif distance_method == "Géométrique uniquement":
         durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
         calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
+        st.warning(f"📊 Méthode: {calculation_method}")
     
     else:
         # Mode Auto
@@ -2727,177 +2729,169 @@ if plan_button:
         
         method_color = "success" if "Maps" in calculation_method else "info" if "Automatique" in calculation_method else "warning"
         getattr(st, method_color)(f"📊 Méthode: {calculation_method}")
-        
-        # Étape 3: Optimisation
-        update_animation_step(3, "🔄", "Optimisation de l'itinéraire...", [1, 2])
-        status.text("🔄 Optimisation de l'ordre des sites...")
-        progress.progress(0.6)
-        
-        # Déterminer l'ordre des sites selon le mode choisi
-        if order_mode == "✋ Manuel (personnalisé)":
-            # Utiliser l'ordre manuel défini par l'utilisateur
-            if use_base_location and base_location and base_location.strip():
-                # Avec base: [base] + sites_manuels + [base]
-                manual_sites_order = [0]  # Base de départ
-                for manual_idx in st.session_state.manual_order:
-                    if manual_idx < len(sites):
-                        manual_sites_order.append(manual_idx + 1)  # +1 car base est à l'index 0
-                manual_sites_order.append(len(all_sites) - 1)  # Base de retour
-                order = manual_sites_order
-            else:
-                # Sans base: sites_manuels + [premier_site]
-                manual_sites_order = []
-                for manual_idx in st.session_state.manual_order:
-                    if manual_idx < len(sites):
-                        manual_sites_order.append(manual_idx)
-                manual_sites_order.append(len(all_sites) - 1)  # Site de retour
-                order = manual_sites_order
-            
-            st.success("✅ Ordre manuel appliqué")
+    
+    # Étape 3: Optimisation (commune à tous les modes)
+    update_animation_step(3, "🔄", "Optimisation de l'itinéraire...", [1, 2])
+    status.text("🔄 Optimisation de l'ordre des sites...")
+    progress.progress(0.6)
+    
+    # Déterminer l'ordre des sites selon le mode choisi
+    if order_mode == "✋ Manuel (personnalisé)":
+        # Utiliser l'ordre manuel défini par l'utilisateur
+        if use_base_location and base_location and base_location.strip():
+            # Avec base: [base] + sites_manuels + [base]
+            manual_sites_order = [0]  # Base de départ
+            for manual_idx in st.session_state.manual_order:
+                if manual_idx < len(sites):
+                    manual_sites_order.append(manual_idx + 1)  # +1 car base est à l'index 0
+            manual_sites_order.append(len(all_sites) - 1)  # Base de retour
+            order = manual_sites_order
         else:
-            # Utiliser l'optimisation IA au lieu du TSP traditionnel
-            if len(coords) >= 3:
-                # Essayer d'abord l'optimisation IA
-                ai_order, ai_success, ai_message = optimize_route_with_ai(
-                    all_sites, coords, 
-                    base_location if use_base_location else None, 
-                    deepseek_api_key
-                )
-                
-                if ai_success:
-                    order = ai_order
-                    st.success(f"✅ Ordre optimisé par IA: {ai_message}")
-                else:
-                    # Fallback vers TSP si l'IA échoue
-                    order = solve_tsp_fixed_start_end(durations_sec)
-                    st.warning(f"⚠️ IA échouée ({ai_message}), utilisation TSP classique")
-            else:
-                order = list(range(len(coords)))
-                st.success("✅ Ordre séquentiel (moins de 3 sites)")
-                
-            if debug_mode and durations_sec:
-                # Calculer coût total pour transparence
-                total_cost = sum(durations_sec[order[i]][order[i+1]] for i in range(len(order)-1))
-                st.info(f"🔍 Debug Optimisation: ordre={order} | coût total={total_cost/3600:.2f}h")
+            # Sans base: sites_manuels + [premier_site]
+            manual_sites_order = []
+            for manual_idx in st.session_state.manual_order:
+                if manual_idx < len(sites):
+                    manual_sites_order.append(manual_idx)
+            manual_sites_order.append(len(all_sites) - 1)  # Site de retour
+            order = manual_sites_order
         
-        status.text("🛣️ Calcul de l'itinéraire détaillé...")
-        # Étape 4: Génération de l'itinéraire
-        update_animation_step(4, "🛣️", "Génération de l'itinéraire détaillé...", [1, 2, 3])
-        progress.progress(0.8)
-        
-        segments = []
-        zero_segments_indices = []
-        
-        for i in range(len(order)-1):
-            from_idx = order[i]
-            to_idx = order[i+1]
+        st.success("✅ Ordre manuel appliqué")
+    else:
+        # Utiliser l'optimisation IA au lieu du TSP traditionnel
+        if len(coords) >= 3:
+            # Essayer d'abord l'optimisation IA
+            ai_order, ai_success, ai_message = optimize_route_with_ai(
+                all_sites, coords, 
+                base_location if use_base_location else None, 
+                deepseek_api_key
+            )
             
-            if from_idx < len(durations_sec) and to_idx < len(durations_sec[0]):
-                duration = durations_sec[from_idx][to_idx]
-                distance = distances_m[from_idx][to_idx] if distances_m else 0
-                
-                # Si la distance/durée est nulle, calculer avec la géométrie
-                if duration == 0 or distance == 0:
-                    from math import radians, sin, cos, sqrt, atan2
-                    
-                    def haversine_single(lon1, lat1, lon2, lat2):
-                        R = 6371.0
-                        dlon = radians(lon2 - lon1)
-                        dlat = radians(lat2 - lat1)
-                        a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
-                        c = 2 * atan2(sqrt(a), sqrt(1-a))
-                        return R * c
-                    
-                    # Calculer la distance géométrique
-                    coord_from = coords[from_idx]
-                    coord_to = coords[to_idx]
-                    geometric_km = haversine_single(coord_from[0], coord_from[1], coord_to[0], coord_to[1])
-                    geometric_km *= 1.2  # Facteur de correction pour les routes
-                    
-                    # Si la distance était nulle, la calculer
-                    if distance == 0:
-                        distance = int(geometric_km * 1000)
-                    
-                    # Si SEULEMENT la durée était nulle, la calculer en gardant la distance trouvée
-                    if duration == 0:
-                        # Utiliser la distance réelle si elle existe, sinon la distance géométrique
-                        distance_for_time_calc = distance / 1000 if distance > 0 else geometric_km
-                        geometric_hours = distance_for_time_calc / default_speed_kmh
-                        duration = int(geometric_hours * 3600)
-                    
-                    zero_segments_indices.append(i)
-                    
-                    if debug_mode:
-                        st.info(f"🔍 Segment {i} recalculé géométriquement: {geometric_km:.1f}km, {duration/3600:.2f}h")
-                
-                # Debug: Afficher les valeurs des segments
-                if debug_mode:
-                    st.info(f"🔍 Debug Segment {i}: de {from_idx} vers {to_idx} = {duration}s ({duration/3600:.2f}h), {distance/1000:.1f}km")
-                
-                segments.append({
-                    "distance": distance,
-                    "duration": duration
-                })
+            if ai_success:
+                order = ai_order
+                st.success(f"✅ Ordre optimisé par IA: {ai_message}")
             else:
-                segments.append({"distance": 0, "duration": 0})
+                # Fallback vers TSP si l'IA échoue
+                order = solve_tsp_fixed_start_end(durations_sec)
+                st.warning(f"⚠️ IA échouée ({ai_message}), utilisation TSP classique")
+        else:
+            order = list(range(len(coords)))
+            st.success("✅ Ordre séquentiel (moins de 3 sites)")
+            
+        if debug_mode and durations_sec:
+            # Calculer coût total pour transparence
+            total_cost = sum(durations_sec[order[i]][order[i+1]] for i in range(len(order)-1))
+            st.info(f"🔍 Debug Optimisation: ordre={order} | coût total={total_cost/3600:.2f}h")
         
-        if not segments:
-            st.error("❌ AUCUN segment créé!")
-            st.stop()
+    status.text("🛣️ Calcul de l'itinéraire détaillé...")
+    # Étape 4: Génération de l'itinéraire
+    update_animation_step(4, "🛣️", "Génération de l'itinéraire détaillé...", [1, 2, 3])
+    progress.progress(0.8)
+    
+    segments = []
+    zero_segments_indices = []
+    
+    for i in range(len(order)-1):
+        from_idx = order[i]
+        to_idx = order[i+1]
         
-        # Afficher les segments recalculés géométriquement
-        if zero_segments_indices:
-            st.success(f"✅ {len(zero_segments_indices)} segment(s) recalculé(s) avec la distance géométrique")
-        
-        # Vérifier s'il reste des segments à zéro après le recalcul géométrique
-        remaining_zero_segments = [i for i, s in enumerate(segments) if s['duration'] == 0]
-        if remaining_zero_segments:
-            st.warning(f"⚠️ {len(remaining_zero_segments)} segments avec durée estimée à 1h par défaut")
-        
-        status.text("📅 Génération du planning détaillé...")
-        # Étape 5: Génération du planning
-        update_animation_step(5, "📅", "Finalisation du planning...", [1, 2, 3, 4])
-        progress.progress(0.9)
-        
-        itinerary, sites_ordered, coords_ordered, stats = schedule_itinerary(
-            coords=coords,
-            sites=all_sites,
-            order=order,
-            segments_summary=segments,
-            start_date=start_date,
-            start_activity_time=start_activity_time,
-            end_activity_time=end_activity_time,
-            start_travel_time=start_travel_time,
-            end_travel_time=end_travel_time,
-            use_lunch=use_lunch,
-            lunch_start_time=lunch_start_time if use_lunch else time(12,30),
-            lunch_end_time=lunch_end_time if use_lunch else time(14,0),
-            use_prayer=use_prayer,
-            prayer_start_time=prayer_start_time if use_prayer else time(14,0),
-            prayer_duration_min=prayer_duration_min if use_prayer else 20,
-            max_days=max_days,
-            tolerance_hours=tolerance_hours
-        )
-        
-        progress.progress(1.0)
-        status.text("✅ Terminé!")
-        
-        st.session_state.planning_results = {
-            'itinerary': itinerary,
-            'sites_ordered': sites_ordered,
-            'coords_ordered': coords_ordered,
-            'route_polyline': None,
-            'stats': stats,
-            'start_date': start_date,
-            'calculation_method': calculation_method,
-            'segments_summary': segments,
-            'original_order': order.copy(),  # Sauvegarder l'ordre original
-            'durations_matrix': durations_sec,
-            'distances_matrix': distances_m,
-            'all_coords': coords
-        }
-        st.session_state.manual_itinerary = None
-        st.session_state.edit_mode = False
+        if from_idx < len(durations_sec) and to_idx < len(durations_sec[0]):
+            duration = durations_sec[from_idx][to_idx]
+            distance = distances_m[from_idx][to_idx] if distances_m else 0
+            
+            # Si la distance/durée est nulle, calculer avec la géométrie
+            if duration == 0 or distance == 0:
+                from math import radians, sin, cos, sqrt, atan2
+                
+                # Calculer la distance géométrique
+                coord_from = coords[from_idx]
+                coord_to = coords[to_idx]
+                geometric_km = haversine(coord_from[0], coord_from[1], coord_to[0], coord_to[1])
+                geometric_km *= 1.2  # Facteur de correction pour les routes
+                
+                # Si la distance était nulle, la calculer
+                if distance == 0:
+                    distance = int(geometric_km * 1000)
+                
+                # Si SEULEMENT la durée était nulle, la calculer en gardant la distance trouvée
+                if duration == 0:
+                    # Utiliser la distance réelle si elle existe, sinon la distance géométrique
+                    distance_for_time_calc = distance / 1000 if distance > 0 else geometric_km
+                    geometric_hours = distance_for_time_calc / default_speed_kmh
+                    duration = int(geometric_hours * 3600)
+                
+                zero_segments_indices.append(i)
+                
+                if debug_mode:
+                    st.info(f"🔍 Segment {i} recalculé géométriquement: {geometric_km:.1f}km, {duration/3600:.2f}h")
+            
+            # Debug: Afficher les valeurs des segments
+            if debug_mode:
+                st.info(f"🔍 Debug Segment {i}: de {from_idx} vers {to_idx} = {duration}s ({duration/3600:.2f}h), {distance/1000:.1f}km")
+            
+            segments.append({
+                "distance": distance,
+                "duration": duration
+            })
+        else:
+            segments.append({"distance": 0, "duration": 0})
+    
+    if not segments:
+        st.error("❌ AUCUN segment créé!")
+        st.stop()
+    
+    # Afficher les segments recalculés géométriquement
+    if zero_segments_indices:
+        st.success(f"✅ {len(zero_segments_indices)} segment(s) recalculé(s) avec la distance géométrique")
+    
+    # Vérifier s'il reste des segments à zéro après le recalcul géométrique
+    remaining_zero_segments = [i for i, s in enumerate(segments) if s['duration'] == 0]
+    if remaining_zero_segments:
+        st.warning(f"⚠️ {len(remaining_zero_segments)} segments avec durée estimée à 1h par défaut")
+    
+    status.text("📅 Génération du planning détaillé...")
+    # Étape 5: Génération du planning
+    update_animation_step(5, "📅", "Finalisation du planning...", [1, 2, 3, 4])
+    progress.progress(0.9)
+    
+    itinerary, sites_ordered, coords_ordered, stats = schedule_itinerary(
+        coords=coords,
+        sites=all_sites,
+        order=order,
+        segments_summary=segments,
+        start_date=start_date,
+        start_activity_time=start_activity_time,
+        end_activity_time=end_activity_time,
+        start_travel_time=start_travel_time,
+        end_travel_time=end_travel_time,
+        use_lunch=use_lunch,
+        lunch_start_time=lunch_start_time if use_lunch else time(12,30),
+        lunch_end_time=lunch_end_time if use_lunch else time(14,0),
+        use_prayer=use_prayer,
+        prayer_start_time=prayer_start_time if use_prayer else time(14,0),
+        prayer_duration_min=prayer_duration_min if use_prayer else 20,
+        max_days=max_days,
+        tolerance_hours=tolerance_hours
+    )
+    
+    progress.progress(1.0)
+    status.text("✅ Terminé!")
+    
+    st.session_state.planning_results = {
+        'itinerary': itinerary,
+        'sites_ordered': sites_ordered,
+        'coords_ordered': coords_ordered,
+        'route_polyline': None,
+        'stats': stats,
+        'start_date': start_date,
+        'calculation_method': calculation_method,
+        'segments_summary': segments,
+        'original_order': order.copy(),  # Sauvegarder l'ordre original
+        'durations_matrix': durations_sec,
+        'distances_matrix': distances_m,
+        'all_coords': coords
+    }
+    st.session_state.manual_itinerary = None
+    st.session_state.edit_mode = False
 
 # --------------------------
 # AFFICHAGE RÉSULTATS
