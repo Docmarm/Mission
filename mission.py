@@ -1638,14 +1638,17 @@ def schedule_itinerary(coords, sites, order, segments_summary,
             # Vérifier si l'activité peut continuer (nouvelle option)
             can_continue = site.get('Peut continuer', False)  # Par défaut False
             
+            # Vérifier si la nuitée est possible dans cette zone
+            overnight_allowed = site.get('Possibilité de nuitée', True)  # Par défaut True
+            
             # Handle visit that extends beyond activity hours
             if visit_end > activity_end_time:
                 # Si l'activité se termine dans le seuil de tolérance, elle peut continuer le même jour
                 if visit_end <= tolerance_end_time and can_continue:
                     # L'activité continue sur le même jour malgré le dépassement
                     pass  # Pas de division, traitement normal
-                elif can_continue:
-                    # L'activité dépasse le seuil de tolérance et peut être divisée
+                elif can_continue and overnight_allowed:
+                    # L'activité dépasse le seuil de tolérance et peut être divisée, ET la nuitée est autorisée
                     if current_datetime < activity_end_time:
                         # Add partial visit for current day
                         itinerary.append((day_count, current_datetime, activity_end_time, f"{visit_desc} (à continuer)"))
@@ -1661,6 +1664,29 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                     day_end_time = datetime.combine(start_date + timedelta(days=day_count-1), end_travel_time)
                     visit_end = current_datetime + remaining
                     visit_desc = f"Suite {visit_desc}"
+                elif can_continue and not overnight_allowed:
+                    # L'activité peut continuer mais la nuitée n'est pas autorisée - chercher un site proche avec nuitée
+                    # Pour l'instant, on force la fin de l'activité et on ajoute un avertissement
+                    visit_end = activity_end_time
+                    if current_datetime < activity_end_time:
+                        itinerary.append((day_count, current_datetime, activity_end_time, f"{visit_desc} (interrompu - pas de nuitée possible)"))
+                    
+                    # End current day et chercher un hébergement ailleurs
+                    itinerary.append((day_count, activity_end_time, activity_end_time, "🏁 Fin de journée"))
+                    itinerary.append((day_count, activity_end_time, activity_end_time, f"⚠️ Déplacement nécessaire - pas d'hébergement à {city}"))
+                    
+                    # Start next day
+                    day_count += 1
+                    current_datetime = datetime.combine(start_date + timedelta(days=day_count-1), start_activity_time)
+                    day_end_time = datetime.combine(start_date + timedelta(days=day_count-1), end_travel_time)
+                    # Reprendre l'activité restante le jour suivant
+                    remaining_hours = (visit_duration - (activity_end_time - current_datetime)).total_seconds() / 3600
+                    if remaining_hours > 0:
+                        visit_end = current_datetime + timedelta(hours=remaining_hours)
+                        visit_desc = f"Suite {visit_desc}"
+                    else:
+                        # L'activité était déjà terminée
+                        visit_end = current_datetime
                 else:
                     # L'activité ne peut pas continuer - la forcer à se terminer à l'heure limite
                     visit_end = activity_end_time
@@ -2108,7 +2134,8 @@ if st.sidebar.button("🔍 Tester connexion Maps"):
 
 # Mention développeur
 st.sidebar.markdown("---")
-st.sidebar.caption("💻 Developed by @Moctar All rights reserved")
+st.sidebar.caption("💻 Developed by @Moctar TAll (77 639 96 12))")
+st.sidebar.caption("All rights reserved")
 
 # --------------------------
 # FORMULAIRE
@@ -2165,13 +2192,13 @@ with tab1:
     if 'sites_df' not in st.session_state:
         if use_base_location:
             st.session_state.sites_df = pd.DataFrame([
-                {"Ville": "Thiès", "Type": "Client", "Activité": "Réunion commerciale", "Durée (h)": 2.0},
-                {"Ville": "Saint-Louis", "Type": "Sites technique", "Activité": "Inspection", "Durée (h)": 3.0},
+                {"Ville": "Thiès", "Type": "Client", "Activité": "Réunion commerciale", "Durée (h)": 2.0, "Peut continuer": False, "Possibilité de nuitée": True},
+                {"Ville": "Saint-Louis", "Type": "Sites technique", "Activité": "Inspection", "Durée (h)": 3.0, "Peut continuer": False, "Possibilité de nuitée": True},
             ])
         else:
             st.session_state.sites_df = pd.DataFrame([
-                {"Ville": "Dakar", "Type": "Agence", "Activité": "Brief", "Durée (h)": 0.5},
-                {"Ville": "Thiès", "Type": "Sites technique", "Activité": "Visite", "Durée (h)": 2.0},
+                {"Ville": "Dakar", "Type": "Agence", "Activité": "Brief", "Durée (h)": 0.5, "Peut continuer": False, "Possibilité de nuitée": True},
+                {"Ville": "Thiès", "Type": "Sites technique", "Activité": "Visite", "Durée (h)": 2.0, "Peut continuer": False, "Possibilité de nuitée": True},
             ])
     
     # Gestion des types de sites personnalisés
@@ -2229,9 +2256,15 @@ with tab1:
                 default=False,
                 help="Cochez si cette activité peut être reportée au jour suivant si elle dépasse les heures d'activité",
                 width="small"
+            ),
+            "Possibilité de nuitée": st.column_config.CheckboxColumn(
+                "🏨 Nuitée possible",
+                default=True,
+                help="Décochez si cette zone ne dispose pas d'hébergement correct et qu'il faut éviter d'y passer la nuit",
+                width="small"
             )
         },
-        column_order=["Ville", "Type", "Activité", "Durée (h)", "Peut continuer"]
+        column_order=["Ville", "Type", "Activité", "Durée (h)", "Peut continuer", "Possibilité de nuitée"]
     )
     
     # Interface pour saisir un nouveau type si "Autre (saisir)" est sélectionné
@@ -3049,6 +3082,43 @@ if st.session_state.planning_results:
                     height=100,
                     key=f"desc_{global_idx}"
                 )
+
+                # Saisie manuelle des distances pour les trajets
+                override_km = None
+                override_h = None
+                override_m = None
+                if "→" in desc:
+                    import re
+                    km_val = 0.0
+                    h_val = 0
+                    m_val = 0
+                    # Essayer d'extraire (123.4 km, 2h30) ou (123.4 km)
+                    m_with_time = re.search(r"\((['\d\.']+)\s*km,\s*([^)]+)\)", desc)
+                    if m_with_time:
+                        try:
+                            km_val = float(m_with_time.group(1))
+                            time_str = m_with_time.group(2).strip()
+                            m_time = re.match(r"(\d+)\s*h\s*(\d{1,2})", time_str)
+                            if m_time:
+                                h_val = int(m_time.group(1))
+                                m_val = int(m_time.group(2))
+                        except Exception:
+                            pass
+                    else:
+                        m_km = re.search(r"\(([\d\.]+)\s*km\)", desc)
+                        if m_km:
+                            try:
+                                km_val = float(m_km.group(1))
+                            except Exception:
+                                pass
+                    st.markdown("**Distance du trajet (si différente)**")
+                    col_d1, col_d2, col_d3 = st.columns([1, 1, 1])
+                    with col_d1:
+                        override_km = st.number_input("Distance (km)", min_value=0.0, value=float(km_val), key=f"km_{global_idx}")
+                    with col_d2:
+                        override_h = st.number_input("Heures", min_value=0, value=int(h_val), key=f"kh_{global_idx}")
+                    with col_d3:
+                        override_m = st.number_input("Minutes", min_value=0, max_value=59, value=int(m_val), key=f"kmn_{global_idx}")
                 
                 col_btn1, col_btn2, col_btn3 = st.columns(3)
                 
@@ -3056,7 +3126,18 @@ if st.session_state.planning_results:
                     if st.button("💾 Sauvegarder", key=f"save_{global_idx}", use_container_width=True):
                         new_sdt = datetime.combine(sdt.date(), new_start)
                         new_edt = datetime.combine(edt.date(), new_end)
-                        st.session_state.manual_itinerary[global_idx] = (day, new_sdt, new_edt, new_desc)
+                        # Appliquer éventuelles distances sur la description (pour les trajets)
+                        updated_desc = new_desc
+                        if override_km is not None:
+                            import re
+                            # Retirer ancien motif distance s'il existe
+                            updated_desc = re.sub(r"\s*\([\d\.\s]+km(?:,\s*[^)]*)?\)\s*$", "", updated_desc).strip()
+                            if override_km > 0:
+                                if (override_h or 0) > 0 or (override_m or 0) > 0:
+                                    updated_desc = f"{updated_desc} ({override_km} km, {int(override_h or 0)}h{int(override_m or 0):02d})"
+                                else:
+                                    updated_desc = f"{updated_desc} ({override_km} km)"
+                        st.session_state.manual_itinerary[global_idx] = (day, new_sdt, new_edt, updated_desc)
                         st.success("Modifications sauvegardées!")
                         st.rerun()
                 
@@ -3127,13 +3208,27 @@ if st.session_state.planning_results:
                 total_visit_hours = 0
                 
                 for day, sdt, edt, desc in st.session_state.manual_itinerary:
-                    if "km" in desc:
-                        import re
-                        m = re.search(r"([\d\.]+)\s*km", desc)
-                        if m:
-                            total_km += float(m.group(1))
+                    import re
+                    # Compter les kilomètres UNIQUEMENT pour les trajets (flèche ou emoji voiture)
+                    if ("→" in desc) or ("🚗" in desc):
+                        # Nouveau format avec temps réel: "(... km, HhMM)"
+                        m_with_time = re.search(r"\(([\d\.]+)\s*km,\s*([^)]+)\)", desc)
+                        if m_with_time:
+                            try:
+                                total_km += float(m_with_time.group(1))
+                            except Exception:
+                                pass
+                        else:
+                            # Ancien format: "(... km)"
+                            m = re.search(r"\(([\d\.]+)\s*km\)", desc)
+                            if m:
+                                try:
+                                    total_km += float(m.group(1))
+                                except Exception:
+                                    pass
                     
-                    if "Visite" in desc or "–" in desc:
+                    # Cumuler les heures de visite (éviter de compter les trajets)
+                    if any(x in desc for x in ["Visite", "–"]) and "→" not in desc:
                         duration = (edt - sdt).total_seconds() / 3600
                         total_visit_hours += duration
                 
@@ -3370,7 +3465,7 @@ if st.session_state.planning_results:
     st.markdown("---")
     st.header("📋 Génération de rapport de mission")
     
-    with st.expander("🤖 Générer un rapport complet avec l'IA", expanded=False):
+    with st.expander("🤖 Générer un rapport complet", expanded=False):
         st.markdown("**Utilisez l'IA pour générer un rapport professionnel orienté activités**")
         
         # Onglets pour organiser l'interface
