@@ -18,16 +18,37 @@ st.set_page_config(
 )
 
 # Import des modules pour l'export PDF et Word
+PDF_AVAILABLE = False
+DOCX_AVAILABLE = False
+
+try:
+    # Vérifier d'abord si reportlab est installé
+    import importlib
+    importlib.import_module('reportlab')
+    REPORTLAB_INSTALLED = True
+except ImportError:
+    REPORTLAB_INSTALLED = False
+
+try:
+    # Vérifier si python-docx est installé
+    importlib.import_module('docx')
+    DOCX_INSTALLED = True
+except ImportError:
+    DOCX_INSTALLED = False
+
 try:
     from pdf_generator import create_pv_pdf, create_word_document, create_mission_pdf, create_docx_document
-    # Vérifier si reportlab est disponible dans pdf_generator
-    import pdf_generator
-    PDF_AVAILABLE = pdf_generator.REPORTLAB_AVAILABLE
+    # Vérifier si les fonctions sont disponibles
+    PDF_AVAILABLE = REPORTLAB_INSTALLED
+    DOCX_AVAILABLE = DOCX_INSTALLED
     if not PDF_AVAILABLE:
-        st.warning("⚠️ Module reportlab non disponible. Installez reportlab pour activer l'export PDF.")
+        st.warning("⚠️ Module reportlab non installé. Installez reportlab pour activer l'export PDF.")
+    if not DOCX_AVAILABLE:
+        st.warning("⚠️ Module python-docx non installé. Installez python-docx pour l'export Word.")
 except ImportError as e:
     PDF_AVAILABLE = False
-    st.warning(f"⚠️ Module PDF non disponible: {e}. Installez les dépendances requises.")
+    DOCX_AVAILABLE = False
+    st.warning(f"⚠️ Module PDF/Word non disponible: {e}. Installez: pip install reportlab python-docx")
 
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
