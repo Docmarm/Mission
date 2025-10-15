@@ -45,20 +45,27 @@ st.caption("Optimisation d'itinéraire + planning journalier + carte interactive
 # --------------------------
 st.sidebar.header("⚙️ Configuration")
 
-# Chargement des clés API depuis le fichier de configuration
+# Chargement des clés API depuis les secrets de Streamlit
 try:
-    config = toml.load('config.toml')
-    graphhopper_api_key = config['api_keys']['graphhopper']
-    deepseek_api_key = config['api_keys']['deepseek']
-    st.sidebar.success("✅ Configuration chargée avec succès")
-except FileNotFoundError:
-    st.sidebar.error("❌ Fichier config.toml non trouvé")
-    graphhopper_api_key = ""
-    deepseek_api_key = ""
-except KeyError as e:
-    st.sidebar.error(f"❌ Clé manquante dans config.toml: {e}")
-    graphhopper_api_key = ""
-    deepseek_api_key = ""
+    # Essayer d'abord les secrets Streamlit (pour le cloud)
+    graphhopper_api_key = st.secrets["api_keys"]["graphhopper"]
+    deepseek_api_key = st.secrets["api_keys"]["deepseek"]
+    st.sidebar.success("✅ Configuration chargée depuis Streamlit Secrets")
+except (FileNotFoundError, KeyError):
+    try:
+        # Sinon, utiliser le fichier local config.toml
+        config = toml.load('config.toml')
+        graphhopper_api_key = config['api_keys']['graphhopper']
+        deepseek_api_key = config['api_keys']['deepseek']
+        st.sidebar.success("✅ Configuration chargée depuis config.toml local")
+    except FileNotFoundError:
+        st.sidebar.error("❌ Ni Streamlit Secrets ni config.toml trouvés")
+        graphhopper_api_key = ""
+        deepseek_api_key = ""
+    except KeyError as e:
+        st.sidebar.error(f"❌ Clé manquante dans la configuration: {e}")
+        graphhopper_api_key = ""
+        deepseek_api_key = ""
 
 st.sidebar.subheader("Calcul des distances")
 distance_method = st.sidebar.radio(
@@ -74,15 +81,24 @@ use_deepseek_fallback = st.sidebar.checkbox(
 )
 
 with st.sidebar.expander("Options avancées"):
-    # Charger les paramètres par défaut depuis la config
+    # Charger les paramètres par défaut depuis la configuration
     try:
-        config_speed = config['settings']['default_speed_kmh']
-        config_cache = config['settings']['use_cache']
-        config_debug = config['settings']['debug_mode']
-    except (NameError, KeyError):
-        config_speed = 95
-        config_cache = True
-        config_debug = False
+        # Essayer d'abord Streamlit Secrets
+        config_speed = st.secrets["settings"]["default_speed_kmh"]
+        config_cache = st.secrets["settings"]["use_cache"]
+        config_debug = st.secrets["settings"]["debug_mode"]
+    except (FileNotFoundError, KeyError):
+        try:
+            # Sinon, utiliser config.toml local
+            config = toml.load('config.toml')
+            config_speed = config['settings']['default_speed_kmh']
+            config_cache = config['settings']['use_cache']
+            config_debug = config['settings']['debug_mode']
+        except (FileNotFoundError, KeyError, NameError):
+            # Valeurs par défaut si aucune config disponible
+            config_speed = 95
+            config_cache = True
+            config_debug = False
     
     default_speed_kmh = st.number_input(
         "Vitesse moyenne (km/h) pour estimations", 
@@ -165,20 +181,29 @@ def estimate_fuel_cost(fuel_consumption_data, fuel_price_per_liter=None):
     if not fuel_consumption_data:
         return None
     
-    # Charger les prix depuis le fichier de configuration si disponible
+    # Charger les prix depuis la configuration (Streamlit Secrets ou config.toml)
     try:
-        config = toml.load('config.toml')
-        fuel_prices = config['settings']['fuel_prices']
+        # Essayer d'abord Streamlit Secrets
+        fuel_prices = st.secrets["settings"]["fuel_prices"]
         default_prices = {
             "Essence": fuel_prices['essence'],
             "Diesel": fuel_prices['diesel']
         }
     except (FileNotFoundError, KeyError):
-        # Prix par défaut au Sénégal (en FCFA) si config non disponible
-        default_prices = {
-            "Essence": 1350,  # FCFA par litre
-            "Diesel": 1200    # FCFA par litre
-        }
+        try:
+            # Sinon, utiliser config.toml local
+            config = toml.load('config.toml')
+            fuel_prices = config['settings']['fuel_prices']
+            default_prices = {
+                "Essence": fuel_prices['essence'],
+                "Diesel": fuel_prices['diesel']
+            }
+        except (FileNotFoundError, KeyError):
+            # Prix par défaut au Sénégal (en FCFA) si aucune config disponible
+            default_prices = {
+                "Essence": 1350,  # FCFA par litre
+                "Diesel": 1200    # FCFA par litre
+            }
     
     fuel_type = fuel_consumption_data["fuel_type"]
     price = fuel_price_per_liter if fuel_price_per_liter else default_prices.get(fuel_type, 1300)
