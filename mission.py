@@ -1256,7 +1256,10 @@ def test_graphhopper_connection(api_key):
             result = response.json()
             if result and "times" in result and "distances" in result:
                 distance_km = result['distances'][0][1] / 1000
-                time_min = result['times'][0][1] / 1000 / 60
+                # Les "times" de GraphHopper Matrix sont généralement en secondes.
+                # Si une valeur est très grande (>100000), on suppose des millisecondes.
+                time_val = result['times'][0][1]
+                time_min = (time_val / 1000 / 60) if time_val > 100000 else (time_val / 60)
                 return True, f"Connexion OK - Test: {distance_km:.1f}km en {time_min:.0f}min"
             else:
                 return False, "Réponse invalide de l'API"
@@ -1324,7 +1327,17 @@ def improved_graphhopper_duration_matrix(api_key, coords):
         if not times or not distances:
             return None, None, "Données manquantes dans la réponse"
         
-        durations = [[time_ms / 1000 for time_ms in row] for row in times]
+        # Normaliser l’unité des temps: secondes ou millisecondes
+        try:
+            flat_times = [t for row in times for t in row]
+            max_time = max(flat_times) if flat_times else 0
+        except Exception:
+            max_time = 0
+        
+        if max_time > 100000:  # vraisemblance de millisecondes
+            durations = [[t / 1000.0 for t in row] for row in times]
+        else:  # secondes
+            durations = times
         
         return durations, distances, "Succès"
         
@@ -1738,25 +1751,42 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                 
                 if use_lunch and lunch_window_start and lunch_window_end and not daily_lunch_added.get(day_count, False):
                     if current_datetime < lunch_window_end and travel_end > lunch_window_start:
-                        lunch_time = max(current_datetime, lunch_window_start)
-                        lunch_end_time_actual = lunch_time + timedelta(hours=1)
-                        
-                        if lunch_end_time_actual > lunch_window_end:
-                            lunch_end_time_actual = lunch_window_end
-                        
-                        # Add travel before lunch if needed
-                        if lunch_time > current_datetime:
-                            itinerary.append((day_count, current_datetime, lunch_time, travel_desc))
+                        # Si l'arrivée se situe dans la fenêtre de déjeuner, placer la pause à l'arrivée
+                        if lunch_window_start <= travel_end <= lunch_window_end:
+                            # Ajouter le trajet en une seule fois jusqu'à l'arrivée
+                            itinerary.append((day_count, current_datetime, travel_end, travel_desc))
                             travel_added = True
-                        
-                        # Add lunch break
-                        itinerary.append((day_count, lunch_time, lunch_end_time_actual, "🍽️ Déjeuner (≤1h)"))
-                        daily_lunch_added[day_count] = True  # Marquer le déjeuner comme ajouté pour ce jour
-                        current_datetime = lunch_end_time_actual
-                        
-                        # Recalculate remaining travel time
-                        remaining_travel = travel_end - lunch_time
-                        travel_end = current_datetime + remaining_travel
+                            
+                            # Placer le déjeuner immédiatement à l'arrivée
+                            lunch_time = max(travel_end, lunch_window_start)
+                            lunch_end_time_actual = min(lunch_time + timedelta(hours=1), lunch_window_end)
+                            itinerary.append((day_count, lunch_time, lunch_end_time_actual, "🍽️ Déjeuner (≤1h)"))
+                            daily_lunch_added[day_count] = True
+                            
+                            # Mettre à jour l'heure courante à la fin du déjeuner
+                            current_datetime = lunch_end_time_actual
+                            # Le trajet est terminé, éviter tout ajout résiduel
+                            travel_end = current_datetime
+                        else:
+                            # Sinon, conserver l’ancienne logique (pause pendant le trajet)
+                            lunch_time = max(current_datetime, lunch_window_start)
+                            lunch_end_time_actual = min(lunch_time + timedelta(hours=1), lunch_window_end)
+                            
+                            # Ajouter la partie de trajet avant la pause si nécessaire
+                            if lunch_time > current_datetime:
+                                itinerary.append((day_count, current_datetime, lunch_time, travel_desc))
+                                travel_added = True
+                            
+                            # Ajouter la pause déjeuner
+                            itinerary.append((day_count, lunch_time, lunch_end_time_actual, "🍽️ Déjeuner (≤1h)"))
+                            daily_lunch_added[day_count] = True
+                            
+                            # Reprendre le trajet après la pause
+                            current_datetime = lunch_end_time_actual
+                            remaining_travel = travel_end - lunch_time
+                            if remaining_travel.total_seconds() < 0:
+                                remaining_travel = timedelta(seconds=0)
+                            travel_end = current_datetime + remaining_travel
                 
                 # Handle prayer break during travel (only if no lunch break)
                 elif use_prayer and prayer_start_time and not daily_prayer_added.get(day_count, False):
