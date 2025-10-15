@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timedelta, time
 from itertools import permutations
 import requests
+import toml
 
 import streamlit as st
 import pandas as pd
@@ -44,9 +45,20 @@ st.caption("Optimisation d'itinéraire + planning journalier + carte interactive
 # --------------------------
 st.sidebar.header("⚙️ Configuration")
 
-# Clés API codées en dur
-graphhopper_api_key = "612dbdf5-8c41-4fec-bd47-d1afac6aa925"
-deepseek_api_key = "sk-d7f2ac8ece8b4d66b1b8f418cdfdb813"
+# Chargement des clés API depuis le fichier de configuration
+try:
+    config = toml.load('config.toml')
+    graphhopper_api_key = config['api_keys']['graphhopper']
+    deepseek_api_key = config['api_keys']['deepseek']
+    st.sidebar.success("✅ Configuration chargée avec succès")
+except FileNotFoundError:
+    st.sidebar.error("❌ Fichier config.toml non trouvé")
+    graphhopper_api_key = ""
+    deepseek_api_key = ""
+except KeyError as e:
+    st.sidebar.error(f"❌ Clé manquante dans config.toml: {e}")
+    graphhopper_api_key = ""
+    deepseek_api_key = ""
 
 st.sidebar.subheader("Calcul des distances")
 distance_method = st.sidebar.radio(
@@ -62,12 +74,22 @@ use_deepseek_fallback = st.sidebar.checkbox(
 )
 
 with st.sidebar.expander("Options avancées"):
+    # Charger les paramètres par défaut depuis la config
+    try:
+        config_speed = config['settings']['default_speed_kmh']
+        config_cache = config['settings']['use_cache']
+        config_debug = config['settings']['debug_mode']
+    except (NameError, KeyError):
+        config_speed = 95
+        config_cache = True
+        config_debug = False
+    
     default_speed_kmh = st.number_input(
         "Vitesse moyenne (km/h) pour estimations", 
-        min_value=20, max_value=120, value=95
+        min_value=20, max_value=120, value=config_speed
     )
-    use_cache = st.checkbox("Utiliser le cache pour géocodage", value=True)
-    debug_mode = st.checkbox("Mode debug (afficher détails calculs)", value=False)
+    use_cache = st.checkbox("Utiliser le cache pour géocodage", value=config_cache)
+    debug_mode = st.checkbox("Mode debug (afficher détails calculs)", value=config_debug)
 
 # --------------------------
 # ÉTAT DE SESSION
@@ -143,11 +165,20 @@ def estimate_fuel_cost(fuel_consumption_data, fuel_price_per_liter=None):
     if not fuel_consumption_data:
         return None
     
-    # Prix par défaut au Sénégal (en FCFA)
-    default_prices = {
-        "Essence": 1350,  # FCFA par litre
-        "Diesel": 1200    # FCFA par litre
-    }
+    # Charger les prix depuis le fichier de configuration si disponible
+    try:
+        config = toml.load('config.toml')
+        fuel_prices = config['settings']['fuel_prices']
+        default_prices = {
+            "Essence": fuel_prices['essence'],
+            "Diesel": fuel_prices['diesel']
+        }
+    except (FileNotFoundError, KeyError):
+        # Prix par défaut au Sénégal (en FCFA) si config non disponible
+        default_prices = {
+            "Essence": 1350,  # FCFA par litre
+            "Diesel": 1200    # FCFA par litre
+        }
     
     fuel_type = fuel_consumption_data["fuel_type"]
     price = fuel_price_per_liter if fuel_price_per_liter else default_prices.get(fuel_type, 1300)
