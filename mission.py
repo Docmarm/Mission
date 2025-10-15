@@ -20,10 +20,14 @@ st.set_page_config(
 # Import des modules pour l'export PDF et Word
 try:
     from pdf_generator import create_pv_pdf, create_word_document, create_mission_pdf, create_docx_document
-    PDF_AVAILABLE = True
-except ImportError:
+    # Vérifier si reportlab est disponible dans pdf_generator
+    import pdf_generator
+    PDF_AVAILABLE = pdf_generator.REPORTLAB_AVAILABLE
+    if not PDF_AVAILABLE:
+        st.warning("⚠️ Module reportlab non disponible. Installez reportlab pour activer l'export PDF.")
+except ImportError as e:
     PDF_AVAILABLE = False
-    st.warning("⚠️ Module PDF non disponible. Installez reportlab pour activer l'export PDF.")
+    st.warning(f"⚠️ Module PDF non disponible: {e}. Installez les dépendances requises.")
 
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
