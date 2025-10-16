@@ -2127,6 +2127,17 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                 current_datetime = datetime.combine(start_date + timedelta(days=day_count-1), start_activity_time)
                 day_end_time = datetime.combine(start_date + timedelta(days=day_count-1), end_travel_time)
     
+    # Add final overnight stay for the last day
+    if day_count > 0 and sites_ordered:
+        last_site = sites_ordered[-1]
+        last_city = last_site['Ville']
+        if last_site.get('Possibilité de nuitée', True):
+            itinerary.append((day_count, current_datetime, current_datetime, f"🏨 Nuitée à {last_city}"))
+        else:
+            # Fallback to base_location if overnight is not possible at the last site
+            if base_location:
+                itinerary.append((day_count, current_datetime, current_datetime, f"🏨 Nuitée à {base_location}"))
+
     # Add final arrival marker
     if day_count > 0 and sites_ordered:
         last_city = sites_ordered[-1]['Ville'].upper()
@@ -2873,7 +2884,8 @@ with tab2:
     with col1:
         st.subheader("📅 Dates")
         start_date = st.date_input("Date de début", value=st.session_state.get("start_date", datetime.today().date()))
-        max_days = st.number_input("Nombre de jours max (Laisser zéro pour calcul automatique)", min_value=0, value=st.session_state.get("max_days", 0), step=1, help="Laisser zéro pour calcul automatique")
+        max_days = st.number_input("Nombre de jours max (Laisser zéro pour calcul automatique)", min_value=0, value=st.session_state.get("max_days", 0), step=1, help="Laisser zéro pour le calcul automatique. Agit comme une limite supérieure.")
+        desired_days = st.number_input("Nombre de jours souhaités (Optionnel)", min_value=0, value=st.session_state.get("desired_days", 0), step=1, help="Laissez à zéro pour ignorer. Le planning sera ajusté pour correspondre à ce nombre si possible.")
         
         st.divider()
         
@@ -3528,19 +3540,36 @@ if plan_button:
 
     optimal_days = int(dry_stats.get('total_days', 1))
     user_max = int(max_days) if isinstance(max_days, (int, float)) else 0
-    # Décision effective
-    if user_max <= 0:
+    user_desired = int(desired_days) if isinstance(desired_days, (int, float)) else 0
+
+    # Logique de décision pour les jours effectifs
+    if user_desired > 0:
+        if user_max > 0 and user_desired > user_max:
+            st.warning(f"Le nombre de jours souhaités ({user_desired}) dépasse le maximum autorisé ({user_max}). Utilisation du maximum.")
+            effective_max_days = user_max
+        else:
+            effective_max_days = user_desired
+        
+        if effective_max_days < optimal_days:
+            stretch_days_flag = True
+            st.warning(f"⚠️ Objectif ({effective_max_days} jours) < optimal ({optimal_days}). Compression avec journées étirées.")
+        else:
+            stretch_days_flag = False
+            st.success(f"✅ Planning ajusté à {effective_max_days} jours comme souhaité.")
+
+    elif user_max > 0:
+        if user_max < optimal_days:
+            effective_max_days = user_max
+            stretch_days_flag = True
+            st.warning(f"⚠️ Objectif ({user_max} jours) < optimal ({optimal_days}). Compression en {user_max} jours avec journées étirées.")
+        else:
+            effective_max_days = user_max
+            stretch_days_flag = False
+            st.success(f"✅ Le planning tient en {optimal_days} jours (objectif max: {user_max} jours).")
+    else:
         effective_max_days = optimal_days
         stretch_days_flag = False
-        st.info(f"🧮 Jours optimaux calculés automatiquement: {optimal_days} jour(s)")
-    elif user_max < optimal_days:
-        effective_max_days = user_max
-        stretch_days_flag = True
-        st.warning(f"⚠️ Objectif ({user_max} jour(s)) < optimal ({optimal_days}). Compression en {user_max} jour(s) avec journées étirées.")
-    else:
-        effective_max_days = user_max
-        stretch_days_flag = False
-        st.success(f"✅ Le planning tient en {optimal_days} jour(s) (objectif: {user_max} jour(s))")
+        st.info(f"🧮 Jours optimaux calculés automatiquement: {optimal_days} jour(s).")
 
     # Planification finale avec paramètres effectifs
     itinerary, sites_ordered, coords_ordered, stats = schedule_itinerary(
@@ -4594,19 +4623,37 @@ if st.session_state.planning_results:
                     )
 
                     new_optimal_days = int(new_dry_stats.get('total_days', 1))
-                    user_max_days = int(st.session_state.get('max_days', 0) or 0)
-                    if user_max_days <= 0:
+                    user_max_recalc = int(st.session_state.get('max_days', 0))
+                    user_desired_recalc = int(st.session_state.get('desired_days', 0))
+
+                    # Logique de décision pour les jours effectifs lors du recalcul
+                    if user_desired_recalc > 0:
+                        if user_max_recalc > 0 and user_desired_recalc > user_max_recalc:
+                            st.warning(f"Souhait ({user_desired_recalc} jours) > max ({user_max_recalc}). Utilisation du max.")
+                            new_effective_days = user_max_recalc
+                        else:
+                            new_effective_days = user_desired_recalc
+                        
+                        if new_effective_days < new_optimal_days:
+                            new_stretch = True
+                            st.warning(f"⚠️ Objectif ({new_effective_days}) < optimal ({new_optimal_days}). Compression.")
+                        else:
+                            new_stretch = False
+                            st.success(f"✅ Ajusté à {new_effective_days} jours.")
+
+                    elif user_max_recalc > 0:
+                        if user_max_recalc < new_optimal_days:
+                            new_effective_days = user_max_recalc
+                            new_stretch = True
+                            st.warning(f"⚠️ Objectif ({user_max_recalc}) < optimal ({new_optimal_days}). Compression.")
+                        else:
+                            new_effective_days = user_max_recalc
+                            new_stretch = False
+                            st.success(f"✅ Tient en {new_optimal_days} jours (max: {user_max_recalc}).")
+                    else:
                         new_effective_days = new_optimal_days
                         new_stretch = False
-                        st.info(f"🧮 Jours optimaux recalculés: {new_optimal_days} jour(s)")
-                    elif user_max_days < new_optimal_days:
-                        new_effective_days = user_max_days
-                        new_stretch = True
-                        st.warning(f"⚠️ Objectif ({user_max_days} jour(s)) < optimal recalculé ({new_optimal_days}). Compression en {user_max_days} jour(s) avec journées étirées.")
-                    else:
-                        new_effective_days = user_max_days
-                        new_stretch = False
-                        st.success(f"✅ Le planning recalculé tient en {new_optimal_days} jour(s) (objectif: {user_max_days} jour(s))")
+                        st.info(f"🧮 Jours optimaux recalculés: {new_optimal_days}.")
 
                     # Planification finale recalculée
                     new_itinerary, new_sites_ordered, new_coords_ordered, new_stats = schedule_itinerary(
