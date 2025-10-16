@@ -1,6 +1,7 @@
 import os
 import json
 from datetime import datetime, timedelta, time
+import time as time_module
 from itertools import permutations
 import requests
 import toml
@@ -70,27 +71,35 @@ st.caption("Optimisation d'itinéraire + planning journalier + carte interactive
 # --------------------------
 st.sidebar.header("⚙️ Configuration")
 
-# Chargement des clés API depuis les secrets de Streamlit
-try:
-    # Essayer d'abord les secrets Streamlit (pour le cloud)
-    graphhopper_api_key = st.secrets["api_keys"]["graphhopper"]
-    deepseek_api_key = st.secrets["api_keys"]["deepseek"]
-    st.sidebar.success("✅ Configuration chargée depuis Streamlit Secrets")
-except (FileNotFoundError, KeyError):
+# Chargement sécurisé des clés API (Secrets → ENV → config.toml)
+graphhopper_api_key = (
+    st.secrets.get("api_keys", {}).get("graphhopper")
+    or os.getenv("GRAPHOPPER_API_KEY")
+)
+deepseek_api_key = (
+    st.secrets.get("api_keys", {}).get("deepseek")
+    or os.getenv("DEEPSEEK_API_KEY")
+)
+
+if not graphhopper_api_key or not deepseek_api_key:
     try:
-        # Sinon, utiliser le fichier local config.toml
         config = toml.load('config.toml')
-        graphhopper_api_key = config['api_keys']['graphhopper']
-        deepseek_api_key = config['api_keys']['deepseek']
-        st.sidebar.success("✅ Configuration chargée depuis config.toml local")
-    except FileNotFoundError:
-        st.sidebar.error("❌ Ni Streamlit Secrets ni config.toml trouvés")
-        graphhopper_api_key = ""
-        deepseek_api_key = ""
-    except KeyError as e:
-        st.sidebar.error(f"❌ Clé manquante dans la configuration: {e}")
-        graphhopper_api_key = ""
-        deepseek_api_key = ""
+        graphhopper_api_key = graphhopper_api_key or config.get('api_keys', {}).get('graphhopper', '')
+        deepseek_api_key = deepseek_api_key or config.get('api_keys', {}).get('deepseek', '')
+        st.sidebar.success("✅ Clés API chargées depuis config.toml")
+    except Exception:
+        # Pas de config.toml, on garde les valeurs actuelles (Secrets/ENV)
+        pass
+
+if graphhopper_api_key:
+    st.sidebar.caption("🔑 Maps prêt")
+else:
+    st.sidebar.warning("⚠️ Clé GraphHopper absente — fallback activé si besoin")
+
+if deepseek_api_key:
+    st.sidebar.caption("🤖 Adja prêt")
+else:
+    st.sidebar.warning("⚠️ Clé DeepSeek absente — fonctionnalités IA limitées")
 
 st.sidebar.subheader("Calcul des distances")
 distance_method = st.sidebar.radio(
@@ -106,24 +115,26 @@ use_deepseek_fallback = st.sidebar.checkbox(
 )
 
 with st.sidebar.expander("Options avancées"):
-    # Charger les paramètres par défaut depuis la configuration
+    # Charger les paramètres par défaut depuis la configuration (sécurisé)
     try:
-        # Essayer d'abord Streamlit Secrets
-        config_speed = st.secrets["settings"]["default_speed_kmh"]
-        config_cache = st.secrets["settings"]["use_cache"]
-        config_debug = st.secrets["settings"]["debug_mode"]
-    except (FileNotFoundError, KeyError):
-        try:
-            # Sinon, utiliser config.toml local
-            config = toml.load('config.toml')
-            config_speed = config['settings']['default_speed_kmh']
-            config_cache = config['settings']['use_cache']
-            config_debug = config['settings']['debug_mode']
-        except (FileNotFoundError, KeyError, NameError):
-            # Valeurs par défaut si aucune config disponible
-            config_speed = 95
-            config_cache = True
-            config_debug = False
+        secrets_settings = st.secrets.get("settings", {})
+    except Exception:
+        secrets_settings = {}
+    try:
+        local_config = toml.load('config.toml') if os.path.exists('config.toml') else {}
+    except Exception:
+        local_config = {}
+
+    config_speed = secrets_settings.get("default_speed_kmh")
+    config_cache = secrets_settings.get("use_cache")
+    config_debug = secrets_settings.get("debug_mode")
+
+    if config_speed is None:
+        config_speed = local_config.get('settings', {}).get('default_speed_kmh', 95)
+    if config_cache is None:
+        config_cache = local_config.get('settings', {}).get('use_cache', True)
+    if config_debug is None:
+        config_debug = local_config.get('settings', {}).get('debug_mode', False)
     
     default_speed_kmh = st.number_input(
         "Vitesse moyenne (km/h) pour estimations", 
@@ -207,28 +218,29 @@ def estimate_fuel_cost(fuel_consumption_data, fuel_price_per_liter=None):
         return None
     
     # Charger les prix depuis la configuration (Streamlit Secrets ou config.toml)
+    default_prices = None
     try:
-        # Essayer d'abord Streamlit Secrets
-        fuel_prices = st.secrets["settings"]["fuel_prices"]
-        default_prices = {
-            "Essence": fuel_prices['essence'],
-            "Diesel": fuel_prices['diesel']
-        }
-    except (FileNotFoundError, KeyError):
+        secrets_settings = st.secrets.get('settings', {})
+        fuel_prices = secrets_settings.get('fuel_prices')
+    except Exception:
+        fuel_prices = None
+    if fuel_prices is None:
         try:
-            # Sinon, utiliser config.toml local
-            config = toml.load('config.toml')
-            fuel_prices = config['settings']['fuel_prices']
-            default_prices = {
-                "Essence": fuel_prices['essence'],
-                "Diesel": fuel_prices['diesel']
-            }
-        except (FileNotFoundError, KeyError):
-            # Prix par défaut au Sénégal (en FCFA) si aucune config disponible
-            default_prices = {
-                "Essence": 1350,  # FCFA par litre
-                "Diesel": 1200    # FCFA par litre
-            }
+            config = toml.load('config.toml') if os.path.exists('config.toml') else {}
+            fuel_prices = config.get('settings', {}).get('fuel_prices')
+        except Exception:
+            fuel_prices = None
+    if fuel_prices:
+        default_prices = {
+            "Essence": fuel_prices.get('essence'),
+            "Diesel": fuel_prices.get('diesel')
+        }
+    else:
+        # Prix par défaut au Sénégal (en FCFA) si aucune config disponible
+        default_prices = {
+            "Essence": 1350,  # FCFA par litre
+            "Diesel": 1200    # FCFA par litre
+        }
     
     fuel_type = fuel_consumption_data["fuel_type"]
     price = fuel_price_per_liter if fuel_price_per_liter else default_prices.get(fuel_type, 1300)
@@ -1273,6 +1285,14 @@ def test_graphhopper_connection(api_key):
     except Exception as e:
         return False, f"Erreur: {str(e)}"
 
+def _get_matrix_ttl_seconds():
+    """TTL pour le cache de matrices (par défaut 24h)."""
+    try:
+        return int(st.secrets.get("MATRIX_TTL_SECONDS", 24 * 3600))
+    except Exception:
+        return 24 * 3600
+
+@st.cache_data(ttl=_get_matrix_ttl_seconds(), show_spinner=False)
 def improved_graphhopper_duration_matrix(api_key, coords):
     """Calcul de matrice via GraphHopper avec gestion d'erreurs"""
     if not api_key:
@@ -1291,59 +1311,69 @@ def improved_graphhopper_duration_matrix(api_key, coords):
                 return None, None, f"Coordonnées hors limites pour le point {i+1}: ({lon}, {lat})"
         
         points = [[coord[0], coord[1]] for coord in coords]
-        
         url = "https://graphhopper.com/api/1/matrix"
         data = {
             "points": points,
             "profile": "car",
             "out_arrays": ["times", "distances"]
         }
-        
         headers = {"Content-Type": "application/json"}
         params = {"key": api_key}
-        
-        response = requests.post(url, json=data, params=params, headers=headers, timeout=30)
-        
-        if response.status_code != 200:
-            if response.status_code == 401:
-                return None, None, "Clé API invalide"
-            elif response.status_code == 400:
-                # Erreur HTTP 400 - Requête malformée
+
+        last_error = None
+        for attempt in range(3):
+            try:
+                response = requests.post(url, json=data, params=params, headers=headers, timeout=30)
+            except Exception as e:
+                last_error = str(e)
+                time_module.sleep(1 + attempt)
+                continue
+            
+            if response.status_code == 200:
+                result = response.json()
+                times = result.get("times")
+                distances = result.get("distances")
+                if not times or not distances:
+                    return None, None, "Données manquantes dans la réponse"
                 try:
-                    error_detail = response.json()
-                    error_msg = error_detail.get('message', 'Requête invalide')
-                    return None, None, f"Erreur HTTP 400: {error_msg}. Vérifiez que toutes les villes sont valides et géolocalisables."
-                except:
-                    return None, None, "Erreur HTTP 400: Requête invalide. Vérifiez que toutes les villes sont valides et géolocalisables."
-            elif response.status_code == 429:
-                return None, None, "Limite de requêtes atteinte"
+                    flat_times = [t for row in times for t in row]
+                    max_time = max(flat_times) if flat_times else 0
+                except Exception:
+                    max_time = 0
+                durations = [[t / 1000.0 for t in row] for row in times] if max_time > 100000 else times
+                return durations, distances, "Succès"
             else:
-                return None, None, f"Erreur HTTP {response.status_code}"
-        
-        result = response.json()
-        times = result.get("times")
-        distances = result.get("distances")
-        
-        if not times or not distances:
-            return None, None, "Données manquantes dans la réponse"
-        
-        # Normaliser l’unité des temps: secondes ou millisecondes
-        try:
-            flat_times = [t for row in times for t in row]
-            max_time = max(flat_times) if flat_times else 0
-        except Exception:
-            max_time = 0
-        
-        if max_time > 100000:  # vraisemblance de millisecondes
-            durations = [[t / 1000.0 for t in row] for row in times]
-        else:  # secondes
-            durations = times
-        
-        return durations, distances, "Succès"
-        
+                if response.status_code == 401:
+                    return None, None, "Clé API invalide"
+                elif response.status_code == 400:
+                    try:
+                        error_detail = response.json()
+                        error_msg = error_detail.get('message', 'Requête invalide')
+                        return None, None, f"Erreur HTTP 400: {error_msg}. Vérifiez que toutes les villes sont valides et géolocalisables."
+                    except:
+                        return None, None, "Erreur HTTP 400: Requête invalide. Vérifiez que toutes les villes sont valides et géolocalisables."
+                elif response.status_code == 429:
+                    last_error = "Limite de requêtes atteinte"
+                    time_module.sleep(2 + attempt)
+                    continue
+                elif 500 <= response.status_code < 600:
+                    last_error = f"Erreur HTTP {response.status_code}"
+                    time_module.sleep(1 + attempt)
+                    continue
+                else:
+                    return None, None, f"Erreur HTTP {response.status_code}"
+        return None, None, f"Échec après retries: {last_error or 'Erreur inconnue'}"
     except Exception as e:
         return None, None, f"Erreur: {str(e)}"
 
+def _get_deepseek_matrix_ttl_seconds():
+    """TTL pour le cache de matrices DeepSeek (par défaut 6h)."""
+    try:
+        return int(st.secrets.get("DEEPSEEK_MATRIX_TTL_SECONDS", 6 * 3600))
+    except Exception:
+        return 6 * 3600
+
+@st.cache_data(ttl=_get_deepseek_matrix_ttl_seconds(), show_spinner=False)
 def improved_deepseek_estimate_matrix(cities, api_key, debug=False):
     """Estimation via DeepSeek avec distances exactes"""
     if not api_key:
@@ -1379,62 +1409,143 @@ Réponds uniquement en JSON:
             "temperature": 0.1,
             "max_tokens": 2000
         }
-        
-        response = requests.post(
-            "https://api.deepseek.com/chat/completions",
-            headers=headers,
-            json=data,
-            timeout=30
-        )
-        
-        if response.status_code != 200:
-            return None, f"Erreur API: {response.status_code}"
-        
-        result = response.json()
-        text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-        
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        
-        if start >= 0 and end > start:
-            json_str = text[start:end]
-            data = json.loads(json_str)
+
+        last_error = None
+        for attempt in range(3):
+            try:
+                response = requests.post(
+                    "https://api.deepseek.com/chat/completions",
+                    headers=headers,
+                    json=data,
+                    timeout=30
+                )
+            except Exception as e:
+                last_error = str(e)
+                time_module.sleep(1 + attempt)
+                continue
             
-            minutes_matrix = data.get("durations_minutes", [])
-            km_matrix = data.get("distances_km", [])
-            
-            seconds_matrix = [[int(m) * 60 for m in row] for row in minutes_matrix]
-            distances_matrix = [[int(km * 1000) for km in row] for row in km_matrix]
-            
-            return (seconds_matrix, distances_matrix), "Succès DeepSeek"
-        
-        return None, "Format invalide"
-        
+            if response.status_code != 200:
+                if response.status_code == 429:
+                    last_error = "Limite de requêtes atteinte"
+                    time_module.sleep(2 + attempt)
+                    continue
+                elif 500 <= response.status_code < 600:
+                    last_error = f"Erreur HTTP {response.status_code}"
+                    time_module.sleep(1 + attempt)
+                    continue
+                else:
+                    return None, f"Erreur API: {response.status_code}"
+
+            result = response.json()
+            text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            start = text.find("{")
+            end = text.rfind("}") + 1
+            if start >= 0 and end > start:
+                try:
+                    json_str = text[start:end]
+                    parsed = json.loads(json_str)
+                    minutes_matrix = parsed.get("durations_minutes", [])
+                    km_matrix = parsed.get("distances_km", [])
+                    seconds_matrix = [[int(m) * 60 for m in row] for row in minutes_matrix]
+                    distances_matrix = [[int(km * 1000) for km in row] for row in km_matrix]
+                    return (seconds_matrix, distances_matrix), "Succès DeepSeek"
+                except Exception as parse_err:
+                    return None, f"Format invalide: {parse_err}"
+            else:
+                last_error = "Réponse non JSON"
+                time_module.sleep(1 + attempt)
+                continue
+        return None, f"Échec après retries: {last_error or 'Erreur inconnue'}"
+    
     except Exception as e:
         return None, f"Erreur: {str(e)}"
 
+def build_ics_from_itinerary(itinerary, start_date, mission_title="Mission Terrain"):
+    """Construit un fichier ICS à partir du planning."""
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Mission Planner//EN"
+    ]
+    now_str = datetime.now().strftime("%Y%m%dT%H%M%S")
+    for idx, (day, sdt, edt, desc) in enumerate(itinerary):
+        dtstart = sdt.strftime("%Y%m%dT%H%M%S")
+        dtend = edt.strftime("%Y%m%dT%H%M%S")
+        uid = f"mission-{now_str}-{idx}@planner"
+        summary = f"{mission_title} - {desc}"
+        lines.extend([
+            "BEGIN:VEVENT",
+            f"UID:{uid}",
+            f"DTSTAMP:{now_str}",
+            f"DTSTART:{dtstart}",
+            f"DTEND:{dtend}",
+            f"SUMMARY:{summary}",
+            f"DESCRIPTION:Jour {day}",
+            "END:VEVENT"
+        ])
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(lines)
+
 @st.cache_data(show_spinner=False)
-def geocode_city_senegal(city: str, use_cache: bool = True):
-    """Géocode une ville au Sénégal"""
+def _get_geolocator():
+    """Ressource Geopy réutilisable (évite recréation à chaque appel)."""
+    # Utilise un cache ressource pour conserver l'instance et respecter le rate limiter
+    @st.cache_resource(show_spinner=False)
+    def _cached_geolocator():
+        return Nominatim(user_agent="mission-planner-senegal/2.0", timeout=10)
+    return _cached_geolocator()
+
+def _get_rate_limited_geocode():
+    """Retourne une fonction geocode rate-limitée avec retries."""
+    @st.cache_resource(show_spinner=False)
+    def _cached_rate_limiter():
+        geolocator = _get_geolocator()
+        return RateLimiter(
+            geolocator.geocode,
+            min_delay_seconds=1,
+            max_retries=3,
+            error_wait_seconds=2,
+            swallow_exceptions=False
+        )
+    return _cached_rate_limiter()
+
+def _geocode_city_senegal_raw(city: str):
+    """Implémentation brute sans cache (avec ressource + retries)."""
     if not city or not isinstance(city, str) or not city.strip():
         return None
-    
     try:
-        geolocator = Nominatim(user_agent="mission-planner-senegal/2.0", timeout=10)
-        rate_limited = RateLimiter(geolocator.geocode, min_delay_seconds=1)
-        
+        rate_limited = _get_rate_limited_geocode()
         query = f"{city}, Sénégal" if "sénégal" not in city.lower() else city
+        # Essai principal: ciblé Sénégal
         loc = rate_limited(query, language="fr", country_codes="SN")
-        
+        # Fallback: requête générale
         if not loc:
             loc = rate_limited(city, language="fr")
-        
         if loc:
             return (loc.longitude, loc.latitude)
     except Exception as e:
         st.error(f"Erreur géocodage pour {city}: {e}")
-    
     return None
+
+def _get_geocode_ttl_seconds():
+    # TTL configurable via secrets, défaut 7 jours
+    try:
+        return int(st.secrets.get("GEOCODE_TTL_SECONDS", 7 * 24 * 3600))
+    except Exception:
+        return 7 * 24 * 3600
+
+@st.cache_data(ttl=_get_geocode_ttl_seconds(), show_spinner=False)
+def _geocode_city_senegal_cached(city: str):
+    return _geocode_city_senegal_raw(city)
+
+def geocode_city_senegal(city: str, use_cache: bool = True):
+    """Géocode une ville au Sénégal, avec cache TTL et ressource partagée.
+
+    Args:
+        city: Nom de la ville
+        use_cache: Active ou non le cache des résultats
+    """
+    return _geocode_city_senegal_cached(city) if use_cache else _geocode_city_senegal_raw(city)
 
 def solve_tsp_fixed_start_end(matrix):
     """Résout le TSP avec départ et arrivée fixes"""
@@ -2426,7 +2537,7 @@ st.header("📍 Paramètres de la mission")
 st.subheader("📝 Titre de la mission")
 mission_title = st.text_input(
     "Titre personnalisé de votre mission",
-    value="Mission Terrain",
+    value=st.session_state.get("mission_title", "Mission Terrain"),
     help="Ce titre apparaîtra dans la présentation professionnelle et tous les documents générés",
     placeholder="Ex: Mission d'inspection technique, Visite commerciale, Audit de site..."
 )
@@ -2442,11 +2553,11 @@ with tab1:
     col1, col2 = st.columns(2)
     
     with col1:
-        use_base_location = st.checkbox("Utiliser un point de départ/arrivée fixe", value=True)
+        use_base_location = st.checkbox("Utiliser un point de départ/arrivée fixe", value=st.session_state.get("use_base_location", True))
     
     with col2:
         if use_base_location:
-            base_location = st.text_input("Ville de départ/arrivée", value="Dakar")
+            base_location = st.text_input("Ville de départ/arrivée", value=st.session_state.get("base_location", "Dakar"))
         else:
             base_location = ""
     
@@ -2666,8 +2777,8 @@ with tab2:
     col1, col2 = st.columns([1, 2])  # Réduire la largeur de la colonne Dates
     with col1:
         st.subheader("📅 Dates")
-        start_date = st.date_input("Date de début", value=datetime.today().date())
-        max_days = st.number_input("Nombre de jours max (Laisser zéro pour calcul automatique)", min_value=0, value=0, step=1, help="Laisser zéro pour calcul automatique")
+        start_date = st.date_input("Date de début", value=st.session_state.get("start_date", datetime.today().date()))
+        max_days = st.number_input("Nombre de jours max (Laisser zéro pour calcul automatique)", min_value=0, value=st.session_state.get("max_days", 0), step=1, help="Laisser zéro pour calcul automatique")
         
         st.divider()
         
@@ -2690,17 +2801,17 @@ with tab2:
         st.markdown("**Horaires d'activité** (visites, réunions)")
         col_act1, col_act2 = st.columns(2)
         with col_act1:
-            start_activity_time = st.time_input("Début activités", value=time(8, 0))
+            start_activity_time = st.time_input("Début activités", value=st.session_state.get("start_activity_time", time(8, 0)))
         with col_act2:
-            end_activity_time = st.time_input("Fin activités", value=time(16, 30))
+            end_activity_time = st.time_input("Fin activités", value=st.session_state.get("end_activity_time", time(16, 30)))
         
         # Horaires de voyage
         st.markdown("**Horaires de voyage** (trajets)")
         col_travel1, col_travel2 = st.columns(2)
         with col_travel1:
-            start_travel_time = st.time_input("Début voyages", value=time(7, 30))
+            start_travel_time = st.time_input("Début voyages", value=st.session_state.get("start_travel_time", time(7, 30)))
         with col_travel2:
-            end_travel_time = st.time_input("Fin voyages", value=time(19, 0))
+            end_travel_time = st.time_input("Fin voyages", value=st.session_state.get("end_travel_time", time(19, 0)))
         
         st.divider()
         
@@ -2712,7 +2823,7 @@ with tab2:
                 "Seuil de tolérance (heures)", 
                 min_value=0.0, 
                 max_value=3.0, 
-                value=1.0, 
+                value=st.session_state.get("tolerance_hours", 1.0), 
                 step=0.25,
                 help="Activités se terminant dans ce délai après la fin des heures d'activité peuvent continuer le même jour"
             )
@@ -2733,18 +2844,101 @@ with tab3:
     
     col1, col2 = st.columns(2)
     with col1:
-        use_lunch = st.checkbox("Pause déjeuner", value=True)
+        use_lunch = st.checkbox("Pause déjeuner", value=st.session_state.get("use_lunch", True))
         if use_lunch:
             st.markdown("**Fenêtre de déjeuner**")
-            lunch_start_time = st.time_input("Début fenêtre", value=time(12, 30), key="lunch_start")
-            lunch_end_time = st.time_input("Fin fenêtre", value=time(15, 0), key="lunch_end")
+            lunch_start_time = st.time_input("Début fenêtre", value=st.session_state.get("lunch_start_time", time(12, 30)), key="lunch_start")
+            lunch_end_time = st.time_input("Fin fenêtre", value=st.session_state.get("lunch_end_time", time(15, 0)), key="lunch_end")
     
     with col2:
-        use_prayer = st.checkbox("Pause prière", value=False)
+        use_prayer = st.checkbox("Pause prière", value=st.session_state.get("use_prayer", False))
         if use_prayer:
             st.markdown("**Fenêtre de prière**")
-            prayer_start_time = st.time_input("Début fenêtre", value=time(13, 0), key="prayer_start")
-            prayer_duration_min = st.number_input("Durée pause (min)", min_value=5, max_value=60, value=20, key="prayer_duration")
+            prayer_start_time = st.time_input("Début fenêtre", value=st.session_state.get("prayer_start_time", time(13, 0)), key="prayer_start")
+            prayer_duration_min = st.number_input("Durée pause (min)", min_value=5, max_value=60, value=st.session_state.get("prayer_duration_min", 20), key="prayer_duration")
+
+    st.divider()
+    st.subheader("📦 Import/Export JSON")
+    with st.expander("Sauvegarde et reprise (JSON)"):
+        col_export, col_import = st.columns(2)
+        with col_export:
+            mission_config = {
+                "mission_title": mission_title,
+                "use_base_location": use_base_location,
+                "base_location": base_location,
+                "sites": (st.session_state.sites_df.to_dict(orient="records") if "sites_df" in st.session_state else []),
+                "start_date": start_date.strftime("%Y-%m-%d") if isinstance(start_date, datetime) else str(start_date),
+                "max_days": int(max_days),
+                "start_activity_time": start_activity_time.strftime("%H:%M"),
+                "end_activity_time": end_activity_time.strftime("%H:%M"),
+                "start_travel_time": start_travel_time.strftime("%H:%M"),
+                "end_travel_time": end_travel_time.strftime("%H:%M"),
+                "tolerance_hours": float(tolerance_hours),
+                "use_lunch": bool(use_lunch),
+                "lunch_start_time": (lunch_start_time.strftime("%H:%M") if use_lunch else None),
+                "lunch_end_time": (lunch_end_time.strftime("%H:%M") if use_lunch else None),
+                "use_prayer": bool(use_prayer),
+                "prayer_start_time": (prayer_start_time.strftime("%H:%M") if use_prayer else None),
+                "prayer_duration_min": (int(prayer_duration_min) if use_prayer else None),
+                "distance_method": distance_method,
+            }
+            json_str = json.dumps(mission_config, ensure_ascii=False, indent=2)
+            st.download_button(
+                label="💾 Exporter JSON",
+                data=json_str,
+                file_name=f"mission_config_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+        with col_import:
+            uploaded_file = st.file_uploader("Importer configuration JSON", type=["json"], help="Chargez un fichier exporté précédemment pour reprendre la mission")
+            if uploaded_file is not None:
+                try:
+                    imported = json.loads(uploaded_file.getvalue().decode("utf-8"))
+                    def parse_time(val, fallback):
+                        try:
+                            if isinstance(val, str) and ":" in val:
+                                hh, mm = val.split(":")
+                                return time(int(hh), int(mm))
+                        except Exception:
+                            pass
+                        return fallback
+
+                    st.session_state.mission_title = imported.get("mission_title", mission_title)
+                    st.session_state.use_base_location = imported.get("use_base_location", use_base_location)
+                    st.session_state.base_location = imported.get("base_location", base_location)
+
+                    # Sites
+                    sites_records = imported.get("sites", [])
+                    if isinstance(sites_records, list):
+                        st.session_state.sites_df = pd.DataFrame(sites_records)
+
+                    # Dates et horaires
+                    sd = imported.get("start_date")
+                    try:
+                        if sd:
+                            st.session_state.start_date = datetime.strptime(sd, "%Y-%m-%d").date()
+                    except Exception:
+                        st.session_state.start_date = st.session_state.get("start_date", datetime.today().date())
+
+                    st.session_state.max_days = imported.get("max_days", max_days)
+                    st.session_state.start_activity_time = parse_time(imported.get("start_activity_time"), start_activity_time)
+                    st.session_state.end_activity_time = parse_time(imported.get("end_activity_time"), end_activity_time)
+                    st.session_state.start_travel_time = parse_time(imported.get("start_travel_time"), start_travel_time)
+                    st.session_state.end_travel_time = parse_time(imported.get("end_travel_time"), end_travel_time)
+                    st.session_state.tolerance_hours = imported.get("tolerance_hours", tolerance_hours)
+
+                    # Pauses
+                    st.session_state.use_lunch = imported.get("use_lunch", use_lunch)
+                    st.session_state.lunch_start_time = parse_time(imported.get("lunch_start_time"), lunch_start_time)
+                    st.session_state.lunch_end_time = parse_time(imported.get("lunch_end_time"), lunch_end_time)
+                    st.session_state.use_prayer = imported.get("use_prayer", use_prayer)
+                    st.session_state.prayer_start_time = parse_time(imported.get("prayer_start_time"), prayer_start_time)
+                    st.session_state.prayer_duration_min = imported.get("prayer_duration_min", prayer_duration_min)
+
+                    st.success("✅ Configuration importée. Les paramètres et sites ont été mis à jour.")
+                except Exception as e:
+                    st.error(f"❌ Import JSON invalide: {e}")
 
 # --------------------------
 # PLANIFICATION
@@ -2757,6 +2951,47 @@ with col2:
 if plan_button:
     # Sauvegarde automatique des données avant planification
     st.session_state.sites_df = sites_df
+    # Persistance des paramètres saisis
+    st.session_state.mission_title = mission_title
+    st.session_state.use_base_location = use_base_location
+    st.session_state.base_location = base_location
+    st.session_state.start_date = start_date
+    st.session_state.max_days = max_days
+    st.session_state.start_activity_time = start_activity_time
+    st.session_state.end_activity_time = end_activity_time
+    st.session_state.start_travel_time = start_travel_time
+    st.session_state.end_travel_time = end_travel_time
+    st.session_state.tolerance_hours = tolerance_hours
+    st.session_state.use_lunch = use_lunch
+    st.session_state.lunch_start_time = lunch_start_time if use_lunch else None
+    st.session_state.lunch_end_time = lunch_end_time if use_lunch else None
+    st.session_state.use_prayer = use_prayer
+    st.session_state.prayer_start_time = prayer_start_time if use_prayer else None
+    st.session_state.prayer_duration_min = prayer_duration_min if use_prayer else None
+
+    # Validations basiques avant planification
+    if sites_df is None or sites_df.empty:
+        st.error("❌ Ajoutez au moins un site avant de planifier.")
+        st.stop()
+    issues = []
+    for i, row in sites_df.iterrows():
+        city = str(row.get("Ville", "")).strip()
+        dur = row.get("Durée (h)", None)
+        if not city:
+            issues.append(f"Ligne {i + 1}: Ville manquante ou vide")
+        try:
+            val = float(dur) if dur is not None else 0
+        except Exception:
+            val = 0
+        if val <= 0:
+            issues.append(f"Ligne {i + 1}: Durée (h) doit être > 0")
+    if use_base_location and not str(base_location).strip():
+        issues.append("Point de départ/arrivée activé mais ville non renseignée")
+    if issues:
+        st.error("⚠️ Veuillez corriger ces points avant la planification:")
+        for msg in issues[:10]:
+            st.write(f"- {msg}")
+        st.stop()
     
     # Animation CSS moderne pour l'attente
     st.markdown("""
@@ -2964,7 +3199,11 @@ if plan_button:
         # Message dynamique pendant le géocodage
         if i < len(geocoding_messages) - 1:
             update_animation_step(1, "📍", geocoding_messages[min(i, len(geocoding_messages)-2)], [])
-        coord = geocode_city_senegal(s["Ville"], use_cache)
+        city_val = str(s.get("Ville", "")).strip()
+        if s.get("Type") == "Base" and city_val.lower() == "dakar":
+            coord = (-17.470602, 14.711404)
+        else:
+            coord = geocode_city_senegal(city_val, use_cache)
         if not coord:
             failed.append(s["Ville"])
         else:
@@ -4317,6 +4556,89 @@ if st.session_state.planning_results:
                 ).add_to(m)
             
             st_folium(m, width=None, height=500, use_container_width=True)
+            
+            # Téléchargements KML/KMZ de l'itinéraire (points + trace)
+            try:
+                import zipfile
+                from io import BytesIO
+                
+                # Construire le KML: Placemarks pour chaque étape + LineString pour la route
+                doc_name = mission_title if mission_title else "Itinéraire"
+                kml_parts = [
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+                    "<kml xmlns=\"http://www.opengis.net/kml/2.2\">",
+                    "  <Document>",
+                    f"    <name>{doc_name}</name>"
+                ]
+                
+                # Placemarks pour les points (éviter la duplication si départ=arrivée)
+                for i, site in enumerate(sites_ordered):
+                    if start_end_same and i == n_steps - 1:
+                        continue
+                    lon, lat = coords_ordered[i][0], coords_ordered[i][1]
+                    site_name = site.get('Ville', '')
+                    site_type = site.get('Type', '-')
+                    placemark = f"""
+    <Placemark>
+      <name>Étape {i+1}: {site_name}</name>
+      <description>{site_type}</description>
+      <Point>
+        <coordinates>{lon},{lat},0</coordinates>
+      </Point>
+    </Placemark>"""
+                    kml_parts.append(placemark)
+                
+                # LineString pour la trace (OSRM si disponible, sinon ligne droite)
+                line_coords = "\n".join([f"{pt[1]},{pt[0]},0" for pt in route_pts])
+                linestring = f"""
+    <Placemark>
+      <name>Route</name>
+      <Style>
+        <LineStyle>
+          <color>ff0000ff</color>
+          <width>3</width>
+        </LineStyle>
+      </Style>
+      <LineString>
+        <tessellate>1</tessellate>
+        <coordinates>
+{line_coords}
+        </coordinates>
+      </LineString>
+    </Placemark>"""
+                kml_parts.append(linestring)
+                kml_parts.append("  </Document>")
+                kml_parts.append("</kml>")
+                kml_content = "\n".join(kml_parts)
+                
+                # Préparer téléchargement KML
+                kml_bytes = kml_content.encode('utf-8')
+                
+                # Préparer téléchargement KMZ (doc.kml dans une archive ZIP)
+                kmz_buffer = BytesIO()
+                with zipfile.ZipFile(kmz_buffer, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+                    zf.writestr('doc.kml', kml_content)
+                kmz_bytes = kmz_buffer.getvalue()
+                
+                col_kml, col_kmz = st.columns(2)
+                with col_kml:
+                    st.download_button(
+                        label="📥 Télécharger KML",
+                        data=kml_bytes,
+                        file_name=f"itineraire_{datetime.now().strftime('%Y%m%d')}.kml",
+                        mime="application/vnd.google-earth.kml+xml",
+                        use_container_width=True
+                    )
+                with col_kmz:
+                    st.download_button(
+                        label="📥 Télécharger KMZ (Google Earth)",
+                        data=kmz_bytes,
+                        file_name=f"itineraire_{datetime.now().strftime('%Y%m%d')}.kmz",
+                        mime="application/vnd.google-earth.kmz",
+                        use_container_width=True
+                    )
+            except Exception as e:
+                st.warning(f"Impossible de préparer l'export KML/KMZ: {str(e)[:80]}…")
     
     with tab_export:
         st.subheader("Export")
@@ -4342,7 +4664,7 @@ if st.session_state.planning_results:
             df_export.to_excel(writer, sheet_name='Planning', index=False)
             pd.DataFrame(sites_ordered).to_excel(writer, sheet_name='Sites', index=False)
         
-        col_excel, col_html = st.columns(2)
+        col_excel, col_html, col_ics = st.columns(3)
         
         with col_excel:
             st.download_button(
@@ -4360,6 +4682,15 @@ if st.session_state.planning_results:
                 data=html_export,
                 file_name=f"mission_{datetime.now().strftime('%Y%m%d')}.html",
                 mime="text/html",
+                use_container_width=True
+            )
+        with col_ics:
+            ics_export = build_ics_from_itinerary(current_itinerary, start_date, mission_title)
+            st.download_button(
+                label="📥 Télécharger ICS",
+                data=ics_export,
+                file_name=f"mission_{datetime.now().strftime('%Y%m%d')}.ics",
+                mime="text/calendar",
                 use_container_width=True
             )
 
@@ -4723,21 +5054,7 @@ Fonction: {pv_fonction}
                                     else:
                                         st.info("PDF non disponible")
                                 
-                                with col_pv_rtf:
-                                    if PDF_AVAILABLE:
-                                        rtf_data = create_word_document(
-                                            content=pv_full_content,
-                                            title="Procès-verbal de visite de chantier"
-                                        )
-                                        st.download_button(
-                                            label="📝 RTF",
-                                            data=rtf_data,
-                                            file_name=f"PV_chantier_{pv_site.replace(' ', '_')}_{pv_date.strftime('%Y%m%d')}.rtf",
-                                            mime="application/rtf",
-                                            use_container_width=True
-                                        )
-                                    else:
-                                        st.info("RTF non disponible")
+                                # Suppression de l'export RTF au profit du DOCX
                             
                             else:
                                 st.error(f"❌ Erreur: {pv_result['error']}")
@@ -5240,21 +5557,7 @@ if False and st.session_state.planning_results:
                                     except Exception as e:
                                         st.error(f"Erreur génération PDF: {str(e)}")
                                 
-                                with col_word_rtf:
-                                    try:
-                                        word_data = create_word_document(
-                                            content=report_content,
-                                            title="Rapport de Mission"
-                                        )
-                                        st.download_button(
-                                            label="📝 Word (RTF)",
-                                            data=word_data,
-                                            file_name=f"rapport_mission_{datetime.now().strftime('%Y%m%d_%H%M')}.rtf",
-                                            mime="application/rtf",
-                                            use_container_width=True
-                                        )
-                                    except Exception as e:
-                                        st.error(f"Erreur génération Word RTF: {str(e)}")
+                                # Suppression de l'export Word RTF, on conserve uniquement DOCX
                                 
                                 with col_word_docx:
                                     try:
@@ -5632,21 +5935,7 @@ Fonction: {pv_fonction}
                                     except Exception as e:
                                         st.error(f"Erreur génération PDF: {str(e)}")
                                 
-                                with col_pv_rtf:
-                                    try:
-                                        rtf_data = create_word_document(
-                                            content=pv_full_content,
-                                            title="Procès-verbal de visite de chantier"
-                                        )
-                                        st.download_button(
-                                            label="📝 Word (RTF)",
-                                            data=rtf_data,
-                                            file_name=f"PV_chantier_{pv_site.replace(' ', '_')}_{pv_date.strftime('%Y%m%d')}.rtf",
-                                            mime="application/rtf",
-                                            use_container_width=True
-                                        )
-                                    except Exception as e:
-                                        st.error(f"Erreur génération Word RTF: {str(e)}")
+                                # Suppression de l'export Word RTF, on conserve uniquement DOCX
                                 
                                 with col_pv_docx:
                                     try:
