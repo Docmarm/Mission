@@ -1513,18 +1513,33 @@ def _geocode_city_senegal_raw(city: str):
     """Implémentation brute sans cache (avec ressource + retries)."""
     if not city or not isinstance(city, str) or not city.strip():
         return None
-    try:
-        rate_limited = _get_rate_limited_geocode()
-        query = f"{city}, Sénégal" if "sénégal" not in city.lower() else city
-        # Essai principal: ciblé Sénégal
-        loc = rate_limited(query, language="fr", country_codes="SN")
-        # Fallback: requête générale
-        if not loc:
-            loc = rate_limited(city, language="fr")
-        if loc:
-            return (loc.longitude, loc.latitude)
-    except Exception as e:
-        st.error(f"Erreur géocodage pour {city}: {e}")
+
+    last_error = None
+    for attempt in range(3):  # 3 tentatives
+        try:
+            rate_limited = _get_rate_limited_geocode()
+            query = f"{city}, Sénégal" if "sénégal" not in city.lower() else city
+            
+            # Essai principal: ciblé Sénégal
+            loc = rate_limited(query, language="fr", country_codes="SN")
+            
+            # Fallback: requête générale
+            if not loc:
+                loc = rate_limited(city, language="fr")
+            
+            if loc:
+                return (loc.longitude, loc.latitude)
+        
+        except ConnectionRefusedError as e:
+            last_error = f"Connexion refusée au service de géocodage. Vérifiez votre connexion ou l'état du service. ({e})"
+            time_module.sleep(1 + attempt) # Attente progressive
+            continue
+        except Exception as e:
+            last_error = e
+            time_module.sleep(1 + attempt) # Attente progressive
+            continue
+
+    st.error(f"Erreur de géocodage persistante pour {city} après plusieurs tentatives: {last_error}")
     return None
 
 def _get_geocode_ttl_seconds():
