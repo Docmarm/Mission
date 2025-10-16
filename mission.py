@@ -1767,7 +1767,8 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                        start_travel_time, end_travel_time,
                        use_lunch, lunch_start_time, lunch_end_time,
                        use_prayer, prayer_start_time, prayer_duration_min,
-                       max_days, tolerance_hours=1.0, base_location=None):
+                        max_days, tolerance_hours=1.0, base_location=None, 
+                        stretch_days=False, end_day_early_threshold=1.5):
     """Génère le planning détaillé avec horaires différenciés pour activités et voyages"""
     sites_ordered = [sites[i] for i in order]
     coords_ordered = [coords[i] for i in order]
@@ -2097,7 +2098,12 @@ def schedule_itinerary(coords, sites, order, segments_summary,
             
             # Check if we need to end the day early
             time_until_end = (day_end_time - current_datetime).total_seconds() / 3600
-            if time_until_end <= 1.5 and idx < len(sites_ordered) - 1:
+            
+            # Si on doit "stretcher", on ne termine pas la journée plus tôt que prévu
+            if stretch_days and day_count < max_days:
+                pass  # On continue la journée pour l'étirer
+            
+            elif time_until_end <= end_day_early_threshold and idx < len(sites_ordered) - 1:
                 # End current day and prepare for next day
                 itinerary.append((day_count, current_datetime, current_datetime, f"🏁 Fin de journée"))
                 # Nuitée conditionnelle selon la possibilité
@@ -2125,14 +2131,11 @@ def schedule_itinerary(coords, sites, order, segments_summary,
     if day_count > 0 and sites_ordered:
         last_city = sites_ordered[-1]['Ville'].upper()
         
-        # Si on retourne à la base (Dakar par défaut), ajouter une nuitée
-        if base_location and last_city.upper() == base_location.upper():
-            itinerary.append((day_count, current_datetime, current_datetime, f"🏨 Nuitée à {base_location}"))
-        
         itinerary.append((day_count, current_datetime, current_datetime, f"📍 Arrivée {last_city} – Fin de mission"))
     
-    if max_days > 0 and day_count > max_days:
-        st.warning(f"⚠️ L'itinéraire nécessite {day_count} jours (max défini: {max_days})")
+    # Message d'avertissement si le nombre de jours est dépassé (ne devrait plus arriver avec la nouvelle logique)
+    if max_days > 0 and day_count > max_days and not stretch_days:
+        st.warning(f"⚠️ L'itinéraire nécessite {day_count} jours, mais le maximum était fixé à {max_days}. Le planning est compressé.")
     
     stats = {
         "total_days": day_count,
@@ -3500,7 +3503,46 @@ if plan_button:
     # Étape 5: Génération du planning
     update_animation_step(5, "📅", "Finalisation du planning...", [1, 2, 3, 4])
     progress.progress(0.9)
-    
+
+    # Calcul préalable: nombre de jours optimal (dry-run, sans étirement)
+    _, _, _, dry_stats = schedule_itinerary(
+        coords=coords,
+        sites=all_sites,
+        order=order,
+        segments_summary=segments,
+        start_date=start_date,
+        start_activity_time=start_activity_time,
+        end_activity_time=end_activity_time,
+        start_travel_time=start_travel_time,
+        end_travel_time=end_travel_time,
+        use_lunch=use_lunch,
+        lunch_start_time=lunch_start_time if use_lunch else time(12,30),
+        lunch_end_time=lunch_end_time if use_lunch else time(14,0),
+        use_prayer=use_prayer,
+        prayer_start_time=prayer_start_time if use_prayer else time(14,0),
+        prayer_duration_min=prayer_duration_min if use_prayer else 20,
+        max_days=0,
+        tolerance_hours=tolerance_hours,
+        base_location=base_location
+    )
+
+    optimal_days = int(dry_stats.get('total_days', 1))
+    user_max = int(max_days) if isinstance(max_days, (int, float)) else 0
+    # Décision effective
+    if user_max <= 0:
+        effective_max_days = optimal_days
+        stretch_days_flag = False
+        st.info(f"🧮 Jours optimaux calculés automatiquement: {optimal_days} jour(s)")
+    elif user_max < optimal_days:
+        effective_max_days = user_max
+        stretch_days_flag = True
+        st.warning(f"⚠️ Objectif ({user_max} jour(s)) < optimal ({optimal_days}). Compression en {user_max} jour(s) avec journées étirées.")
+    else:
+        effective_max_days = user_max
+        stretch_days_flag = False
+        st.success(f"✅ Le planning tient en {optimal_days} jour(s) (objectif: {user_max} jour(s))")
+
+    # Planification finale avec paramètres effectifs
     itinerary, sites_ordered, coords_ordered, stats = schedule_itinerary(
         coords=coords,
         sites=all_sites,
@@ -3517,10 +3559,14 @@ if plan_button:
         use_prayer=use_prayer,
         prayer_start_time=prayer_start_time if use_prayer else time(14,0),
         prayer_duration_min=prayer_duration_min if use_prayer else 20,
-        max_days=max_days,
+        max_days=effective_max_days,
         tolerance_hours=tolerance_hours,
-        base_location=base_location
+        base_location=base_location,
+        stretch_days=stretch_days_flag
     )
+
+    if stretch_days_flag and stats.get('total_days', 0) > effective_max_days:
+        st.error(f"❌ Impossible de tenir en {effective_max_days} jour(s). Besoin de {stats.get('total_days')} jours même en étirant les journées.")
     
     progress.progress(1.0)
     status.text("✅ Terminé!")
@@ -3733,6 +3779,23 @@ if st.session_state.planning_results:
                     st.write("**Équivalence environnementale :**")
                     st.write(f"• Arbres à planter pour compenser : **{carbon_data['trees_equivalent']:.0f} arbres**")
                     st.write("• *(1 arbre absorbe ~22 kg CO₂/an)*")
+
+                # Message d'engagement environnemental
+                try:
+                    trees_to_plant = int(carbon_data['trees_equivalent'] + 0.9999)  # Arrondi à l'entier supérieur
+                except Exception:
+                    trees_to_plant = int(round(carbon_data.get('trees_equivalent', 0)))
+
+                st.warning(
+                    f"🌿 Pour un engagement en faveur de l'environnement, engagez-vous à planter au moins "
+                    f"**{trees_to_plant} arbre(s)** lors de votre mission."
+                )
+
+                st.info(
+                    "Conseils éco-responsables: privilégiez l'éco-conduite et le covoiturage lors des missions, maintenez une pression "
+                    "des pneus optimale, limitez la climatisation et optimisez vos trajets "
+                    "pour réduire les kilomètres à vide."
+                )
                 
                 st.divider()
                 
@@ -4508,6 +4571,44 @@ if st.session_state.planning_results:
                     # Recalculer l'itinéraire complet
                     new_sites = [sites_ordered[i] for i in new_order]
                     new_coords = [coords_ordered[i] for i in new_order]
+                    # Calcul du nombre de jours optimal (dry-run)
+                    _, _, _, new_dry_stats = schedule_itinerary(
+                        coords=new_coords,
+                        sites=new_sites,
+                        order=list(range(len(new_order))),
+                        segments_summary=new_segments,
+                        start_date=start_date,
+                        start_activity_time=time(8, 0),
+                        end_activity_time=time(17, 0),
+                        start_travel_time=time(7, 0),
+                        end_travel_time=time(19, 0),
+                        use_lunch=True,
+                        lunch_start_time=time(12, 30),
+                        lunch_end_time=time(14, 0),
+                        use_prayer=False,
+                        prayer_start_time=time(14, 0),
+                        prayer_duration_min=20,
+                        max_days=0,
+                        tolerance_hours=1.0,
+                        base_location=results.get('base_location', '')
+                    )
+
+                    new_optimal_days = int(new_dry_stats.get('total_days', 1))
+                    user_max_days = int(st.session_state.get('max_days', 0) or 0)
+                    if user_max_days <= 0:
+                        new_effective_days = new_optimal_days
+                        new_stretch = False
+                        st.info(f"🧮 Jours optimaux recalculés: {new_optimal_days} jour(s)")
+                    elif user_max_days < new_optimal_days:
+                        new_effective_days = user_max_days
+                        new_stretch = True
+                        st.warning(f"⚠️ Objectif ({user_max_days} jour(s)) < optimal recalculé ({new_optimal_days}). Compression en {user_max_days} jour(s) avec journées étirées.")
+                    else:
+                        new_effective_days = user_max_days
+                        new_stretch = False
+                        st.success(f"✅ Le planning recalculé tient en {new_optimal_days} jour(s) (objectif: {user_max_days} jour(s))")
+
+                    # Planification finale recalculée
                     new_itinerary, new_sites_ordered, new_coords_ordered, new_stats = schedule_itinerary(
                         coords=new_coords,
                         sites=new_sites,
@@ -4524,10 +4625,14 @@ if st.session_state.planning_results:
                         use_prayer=False,
                         prayer_start_time=time(14, 0),
                         prayer_duration_min=20,
-                        max_days=30,
+                        max_days=new_effective_days,
                         tolerance_hours=1.0,
-                        base_location=results.get('base_location', '')
+                        base_location=results.get('base_location', ''),
+                        stretch_days=new_stretch
                     )
+
+                    if new_stretch and new_stats.get('total_days', 0) > new_effective_days:
+                        st.error(f"❌ Impossible de tenir en {new_effective_days} jour(s). Besoin de {new_stats.get('total_days')} jours même en étirant les journées.")
                     
                     # Mettre à jour les résultats
                     st.session_state.manual_itinerary = new_itinerary
