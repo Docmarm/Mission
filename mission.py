@@ -5,6 +5,8 @@ import time as time_module
 from itertools import permutations
 import requests
 import toml
+import re
+import unicodedata
 
 import streamlit as st
 import pandas as pd
@@ -1509,6 +1511,91 @@ def _get_rate_limited_geocode():
         )
     return _cached_rate_limiter()
 
+def _normalize_city_key(name: str) -> str:
+    """Normalise un nom de ville pour les correspondances hors-ligne (sans accents/espaces/ponctuations)."""
+    if not isinstance(name, str):
+        return ""
+    s = name.strip().lower()
+    s = unicodedata.normalize("NFKD", s)
+    s = s.encode("ascii", "ignore").decode("ascii")
+    # Unifier les variantes de 'saint', 'ste', 'st'
+    s = re.sub(r"\bste\b", "saint", s)
+    s = re.sub(r"\bst\b", "saint", s)
+    # Supprimer tout sauf alphanumérique
+    s = re.sub(r"[^a-z0-9]", "", s)
+    return s
+
+# Coordonnées approximatives de grandes villes du Sénégal (lon, lat)
+SENEGAL_CITY_COORDS = {
+    _normalize_city_key("Dakar"): (-17.4677, 14.7167),
+    _normalize_city_key("Pikine"): (-17.3570, 14.7642),
+    _normalize_city_key("Touba"): (-15.8833, 14.8667),
+    _normalize_city_key("Thiès"): (-16.9359, 14.7910),
+    _normalize_city_key("Thies"): (-16.9359, 14.7910),  # variante sans accent
+    _normalize_city_key("Saint-Louis"): (-16.4896, 16.0179),
+    _normalize_city_key("Saint Louis"): (-16.4896, 16.0179),
+    _normalize_city_key("St-Louis"): (-16.4896, 16.0179),
+    _normalize_city_key("Kaolack"): (-16.0726, 14.1475),
+    _normalize_city_key("Ziguinchor"): (-16.2719, 12.5833),
+    _normalize_city_key("Louga"): (-16.2167, 15.6167),
+    _normalize_city_key("Tambacounda"): (-13.6673, 13.7703),
+    _normalize_city_key("Diourbel"): (-16.2348, 14.6550),
+    _normalize_city_key("Fatick"): (-16.4150, 14.3390),
+    _normalize_city_key("Kolda"): (-14.9500, 12.8833),
+    _normalize_city_key("Matam"): (-13.2554, 15.6559),
+    _normalize_city_key("Kaffrine"): (-15.5508, 14.1059),
+    _normalize_city_key("Kedougou"): (-12.1742, 12.5556),
+    _normalize_city_key("Kédougou"): (-12.1742, 12.5556),
+    _normalize_city_key("Sedhiou"): (-15.5569, 12.7081),
+    _normalize_city_key("Sédhiou"): (-15.5569, 12.7081),
+    _normalize_city_key("Rufisque"): (-17.2729, 14.7158),
+    _normalize_city_key("Mbour"): (-16.9600, 14.4361),
+    _normalize_city_key("Richard-Toll"): (-15.6994, 16.4611),
+    _normalize_city_key("Richard Toll"): (-15.6994, 16.4611),
+}
+
+def _offline_lookup_city_coords(city: str):
+    key = _normalize_city_key(city)
+    return SENEGAL_CITY_COORDS.get(key)
+
+def _graphhopper_geocode(city: str):
+    """Fallback via GraphHopper Geocoding API si disponible."""
+    try:
+        # Utilise la clé déjà chargée dans le module si disponible
+        gh_key = globals().get("graphhopper_api_key")
+        if not gh_key:
+            return None
+        url = "https://graphhopper.com/api/1/geocode"
+        params = {
+            "q": f"{city}, Senegal",
+            "locale": "fr",
+            "limit": 5,  # quelques hits pour filtrer le pays
+            "key": gh_key,
+        }
+        resp = requests.get(url, params=params, timeout=10)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        hits = data.get("hits", []) or []
+        if not hits:
+            return None
+        # Tente de sélectionner un résultat au Sénégal
+        chosen = None
+        for h in hits:
+            country = (h.get("country") or h.get("countrycode") or "").lower()
+            if country in ("senegal", "sénégal", "sn"):
+                chosen = h
+                break
+        chosen = chosen or hits[0]
+        pt = chosen.get("point") or {}
+        lat = pt.get("lat")
+        lng = pt.get("lng")
+        if lat is None or lng is None:
+            return None
+        return (float(lng), float(lat))
+    except Exception:
+        return None
+
 def _geocode_city_senegal_raw(city: str):
     """Implémentation brute sans cache (avec ressource + retries)."""
     if not city or not isinstance(city, str) or not city.strip():
@@ -1538,6 +1625,17 @@ def _geocode_city_senegal_raw(city: str):
             last_error = e
             time_module.sleep(1 + attempt) # Attente progressive
             continue
+    # Fallback 1: GraphHopper (si clé dispo)
+    gh_coords = _graphhopper_geocode(city)
+    if gh_coords:
+        st.warning(f"Géocodage Nominatim indisponible. Fallback GraphHopper utilisé pour {city}.")
+        return gh_coords
+
+    # Fallback 2: Dictionnaire hors-ligne
+    offline = _offline_lookup_city_coords(city)
+    if offline:
+        st.info(f"Mode hors-ligne: coordonnées approximatives utilisées pour {city}.")
+        return offline
 
     st.error(f"Erreur de géocodage persistante pour {city} après plusieurs tentatives: {last_error}")
     return None
