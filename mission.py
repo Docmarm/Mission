@@ -106,7 +106,7 @@ else:
 st.sidebar.subheader("Calcul des distances")
 distance_method = st.sidebar.radio(
     "Méthode de calcul",
-    ["Auto (Automatique puis Maps puis Géométrique)", "Automatique uniquement", "Géométrique uniquement", "Maps uniquement"],
+    ["Auto (Automatique puis Maps puis Géométrique)", "Automatique uniquement", "Géométrique uniquement", "Maps uniquement (plus précis)"],
     index=0
 )
 
@@ -2845,13 +2845,29 @@ with tab1:
     # Ajouter une option "Autre (saisir)" pour permettre la saisie libre
     dropdown_options = all_types + ["✏️ Autre (saisir)"]
     
+    # Préparer un DataFrame éditable en y ajoutant une colonne de suppression
+    editable_df = st.session_state.sites_df.copy()
+    if 'Supprimer' not in editable_df.columns:
+        try:
+            editable_df['Supprimer'] = False
+        except Exception:
+            # En cas d'une structure inattendue, garantir l'existence de la colonne
+            editable_df = pd.DataFrame(editable_df)
+            editable_df['Supprimer'] = False
+
     sites_df = st.data_editor(
-        st.session_state.sites_df, 
+        editable_df, 
         num_rows="dynamic", 
         use_container_width=True,
         key="sites_data_editor",
         height=300,  # Hauteur fixe pour une meilleure lisibilité
         column_config={
+            "Supprimer": st.column_config.CheckboxColumn(
+                "🗑️",
+                default=False,
+                help="Cocher pour supprimer cette ligne",
+                width=35
+            ),
             "Ville": st.column_config.TextColumn(
                 "🏙️ Ville", 
                 required=True,
@@ -2894,7 +2910,7 @@ with tab1:
                 width="small"
             )
         },
-        column_order=["Ville", "Type", "Activité", "Durée (h)", "Peut continuer", "Possibilité de nuitée"]
+        column_order=["Supprimer", "Ville", "Type", "Activité", "Durée (h)", "Peut continuer", "Possibilité de nuitée"]
     )
     
     # Interface pour saisir un nouveau type si "Autre (saisir)" est sélectionné
@@ -2927,11 +2943,28 @@ with tab1:
                             st.session_state.sites_df = sites_df
                             # Pas de rerun automatique pour éviter de ralentir la saisie
     
-    # Bouton d'enregistrement
-    col1, col2, col3 = st.columns([2, 1, 2])
+    # Boutons d'action
+    # Vérifier s'il y a des lignes cochées pour suppression
+    has_checked_rows = 'Supprimer' in sites_df.columns and sites_df['Supprimer'].any()
+    
+    if has_checked_rows:
+        col1, col2, col3 = st.columns([2, 1, 2])
+        with col1:
+            if st.button("🗑️ Supprimer lignes cochées", use_container_width=True):
+                remaining_df = sites_df[~sites_df['Supprimer']].copy()
+                if 'Supprimer' in remaining_df.columns:
+                    remaining_df = remaining_df.drop(columns=['Supprimer'])
+                st.session_state.sites_df = remaining_df.reset_index(drop=True)
+                st.success("Lignes sélectionnées supprimées")
+                st.rerun()
+    else:
+        col1, col2, col3 = st.columns([2, 1, 2])
+
     with col2:
         if st.button("💾 Enregistrer", use_container_width=True, type="primary"):
-            st.session_state.sites_df = sites_df
+            # Nettoyer la colonne de suppression avant sauvegarde
+            df_to_save = sites_df.drop(columns=['Supprimer']) if 'Supprimer' in sites_df.columns else sites_df
+            st.session_state.sites_df = df_to_save
             st.session_state.data_saved = True  # Marquer comme sauvegardé
             st.rerun()  # Rafraîchir pour afficher le statut en haut
     
@@ -2939,6 +2972,7 @@ with tab1:
     # st.session_state.sites_df = sites_df
     
     # Option d'ordre des sites
+    order_mode = "🤖 Automatique (optimisé)"  # Valeur par défaut pour 0 ou 1 site
     if len(sites_df) > 1:  # Afficher seulement s'il y a plus d'un site
         st.subheader("🔄 Ordre des visites")
         order_mode = st.radio(
@@ -3010,7 +3044,7 @@ with tab1:
         else:
             st.success("🤖 **Mode automatique activé** - L'ordre des sites sera optimisé automatiquement pour minimiser les temps de trajet")
     else:
-        st.info("ℹ️ Ajoutez au moins 2 sites pour configurer l'ordre de visite")
+        st.info("ℹ️ Ajoutez au moins 1 site pour continuer. L'ordre n'est requis que s'il y a plusieurs sites.")
 
 with tab2:
     col1, col2 = st.columns([1, 2])  # Réduire la largeur de la colonne Dates
@@ -3382,8 +3416,9 @@ if plan_button:
             st.stop()
     else:
         all_sites = sites
-        if len(all_sites) < 2:
-            st.error("❌ Ajoutez au moins 2 sites")
+        # Autoriser la planification avec un seul site (sans base)
+        if len(all_sites) < 1:
+            st.error("❌ Ajoutez au moins 1 site à visiter")
             st.stop()
         first_site = all_sites[0].copy()
         first_site["Activité"] = "Retour"
@@ -3472,7 +3507,7 @@ if plan_button:
     calculation_method = ""
     city_list = [s["Ville"] for s in all_sites]
     
-    if distance_method == "Maps uniquement":
+    if distance_method == "Maps uniquement (plus précis)":
         update_animation_step(2, "🗺️", distance_messages[1], [1])
         durations_sec, distances_m, error_msg = improved_graphhopper_duration_matrix(graphhopper_api_key, coords)
         calculation_method = "Maps"
