@@ -2142,7 +2142,7 @@ def schedule_itinerary(coords, sites, order, segments_summary,
     
     return itinerary, sites_ordered, coords_ordered, stats
 
-def build_professional_html(itinerary, start_date, stats, sites_ordered, segments_summary=None, speed_kmh=110, mission_title="Mission Terrain"):
+def build_professional_html(itinerary, start_date, stats, sites_ordered, segments_summary=None, speed_kmh=110, mission_title="Mission Terrain", coords_ordered=None):
     """Génère un HTML professionnel"""
     def fmt_time(dt):
         return dt.strftime("%Hh%M")
@@ -2246,6 +2246,7 @@ def build_professional_html(itinerary, start_date, stats, sites_ordered, segment
         .nuit {{ background-color: #d1ecf1; font-weight: bold; color: #0c5460; text-align: center; }}
         .distance {{ color: #e74c3c; font-weight: bold; white-space: nowrap; }}
         .note {{ font-size: 12px; color: #7f8c8d; margin-top: 8px; }}
+        .map-section {{ margin-top: 16px; }}
     </style>
 </head>
 <body>
@@ -2338,6 +2339,97 @@ def build_professional_html(itinerary, start_date, stats, sites_ordered, segment
     </table>
 
     <p class="note">ℹ️ Distances/temps indicatifs. Déjeuner (13h00–14h30, ≤1h) et prière (14h00–15h00, ≤20 min) sont flexibles et intégrés sans bloquer les activités.</p>
+"""
+
+    # Intégrer la carte en-dessous du tableau si coords_ordered est fourni
+    map_embed_html = ""
+    try:
+        if coords_ordered and len(coords_ordered) > 0:
+            center_lat = sum(c[1] for c in coords_ordered) / len(coords_ordered)
+            center_lon = sum(c[0] for c in coords_ordered) / len(coords_ordered)
+
+            m = folium.Map(location=[center_lat, center_lon], zoom_start=7)
+
+            # Route via OSRM, fallback sur ligne droite
+            try:
+                coord_str = ";".join([f"{c[0]},{c[1]}" for c in coords_ordered])
+                url = f"https://router.project-osrm.org/route/v1/driving/{coord_str}?overview=full&geometries=geojson"
+                resp = requests.get(url, timeout=10)
+                route_pts = None
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get('routes'):
+                        geom = data['routes'][0].get('geometry')
+                        if isinstance(geom, dict) and geom.get('coordinates'):
+                            route_pts = [[lat, lon] for lon, lat in geom['coordinates']]
+                if not route_pts:
+                    route_pts = [[c[1], c[0]] for c in coords_ordered]
+            except Exception:
+                route_pts = [[c[1], c[0]] for c in coords_ordered]
+            folium.PolyLine(locations=route_pts, color="blue", weight=3, opacity=0.7).add_to(m)
+
+            # Affichage spécial si départ et arrivée identiques
+            n_steps = len(sites_ordered)
+            start_end_same = False
+            if n_steps >= 2:
+                lat0, lon0 = coords_ordered[0][1], coords_ordered[0][0]
+                latN, lonN = coords_ordered[-1][1], coords_ordered[-1][0]
+                start_end_same = abs(lat0 - latN) < 1e-4 and abs(lon0 - lonN) < 1e-4
+
+            for i, site in enumerate(sites_ordered):
+                if i == 0 and start_end_same:
+                    bg_color_left = '#2ecc71'  # Vert pour départ
+                    bg_color_right = '#e74c3c'  # Rouge pour arrivée
+                    html_num = f"""
+<div style=\"display:flex; align-items:center; gap:4px;\">
+  <div style=\"background-color:{bg_color_left}; color:white; border-radius:50%; width:28px; height:28px; text-align:center; font-size:14px; font-weight:bold; line-height:28px; border:2px solid white; box-shadow:0 0 3px rgba(0,0,0,0.5);\">1</div>
+  <div style=\"background-color:{bg_color_right}; color:white; border-radius:50%; width:28px; height:28px; text-align:center; font-size:14px; font-weight:bold; line-height:28px; border:2px solid white; box-shadow:0 0 3px rgba(0,0,0,0.5);\">{n_steps}</div>
+</div>
+"""
+                    folium.Marker(
+                        location=[coords_ordered[i][1], coords_ordered[i][0]],
+                        popup=f"Étapes 1 et {n_steps}: {site.get('Ville','')}<br>{site.get('Type', '-')}",
+                        tooltip=f"Étapes 1 et {n_steps}: {site.get('Ville','')}",
+                        icon=folium.DivIcon(
+                            icon_size=(36, 28),
+                            icon_anchor=(18, 14),
+                            html=html_num
+                        )
+                    ).add_to(m)
+                    continue
+                if start_end_same and i == n_steps - 1:
+                    continue
+
+                bg_color = '#2ecc71' if i == 0 else '#e74c3c' if i == len(sites_ordered)-1 else '#3498db'
+                folium.Marker(
+                    location=[coords_ordered[i][1], coords_ordered[i][0]],
+                    popup=f"Étape {i+1}: {site.get('Ville','')}<br>{site.get('Type', '-')}",
+                    tooltip=f"Étape {i+1}: {site.get('Ville','')}",
+                    icon=folium.DivIcon(
+                        icon_size=(28, 28),
+                        icon_anchor=(14, 14),
+                        html=f"""
+<div style=\"background-color:{bg_color}; color:white; border-radius:50%; width:28px; height:28px; text-align:center; font-size:14px; font-weight:bold; line-height:28px; border:2px solid white; box-shadow:0 0 3px rgba(0,0,0,0.5);\">{i+1}</div>
+"""
+                    )
+                ).add_to(m)
+
+            map_html = m.get_root().render()
+            import base64
+            map_b64 = base64.b64encode(map_html.encode('utf-8')).decode('ascii')
+            map_embed_html = f"""
+    <div class=\"map-section\">
+        <h2>🗺️ Carte de l'itinéraire</h2>
+        <iframe src=\"data:text/html;base64,{map_b64}\" style=\"width:100%; height:600px; border:none;\"></iframe>
+    </div>
+"""
+    except Exception:
+        map_embed_html = ""
+
+    if map_embed_html:
+        html += map_embed_html
+
+    html += """
 </div>
 </body>
 </html>"""
@@ -3494,8 +3586,8 @@ if st.session_state.planning_results:
         )
         
         if view_mode == "🎨 Présentation professionnelle":
-            html_str = build_professional_html(itinerary, start_date, stats, sites_ordered, segments_summary, default_speed_kmh)
-            st.components.v1.html(html_str, height=800, scrolling=True)
+            html_str = build_professional_html(itinerary, start_date, stats, sites_ordered, segments_summary, default_speed_kmh, mission_title, coords_ordered)
+            st.components.v1.html(html_str, height=1100, scrolling=True)
             
             col_html, col_pdf = st.columns(2)
             
@@ -4676,7 +4768,7 @@ if st.session_state.planning_results:
             )
         
         with col_html:
-            html_export = build_professional_html(current_itinerary, start_date, stats, sites_ordered, segments_summary, default_speed_kmh, mission_title)
+            html_export = build_professional_html(current_itinerary, start_date, stats, sites_ordered, segments_summary, default_speed_kmh, mission_title, coords_ordered)
             st.download_button(
                 label="📥 Télécharger HTML",
                 data=html_export,
