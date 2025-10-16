@@ -2783,7 +2783,7 @@ mission_title = st.text_input(
 
 st.divider()
 
-tab1, tab2, tab3 = st.tabs(["Sites à visiter", "Horaires", "Options"])
+tab1, tab2, tab3 = st.tabs(["Sites à visiter", "Dates et Horaires de la mission ", "Paramètrage des pauses"])
 
 with tab1:
     st.markdown("**Configurez votre mission**")
@@ -3016,8 +3016,8 @@ with tab2:
     col1, col2 = st.columns([1, 2])  # Réduire la largeur de la colonne Dates
     with col1:
         st.subheader("📅 Dates")
-        start_date = st.date_input("Date de début", value=st.session_state.get("start_date", datetime.today().date()))
-        max_days = st.number_input("Nombre de jours max (Laisser zéro pour calcul automatique)", min_value=0, value=st.session_state.get("max_days", 0), step=1, help="Laisser zéro pour le calcul automatique. Agit comme une limite supérieure.")
+        start_date = st.date_input("Dat                                                                                                                                                                                                                                             e de départ de la mission", value=st.session_state.get("start_date", datetime.today().date()))
+        max_days = st.number_input("Nombre de jours max (Optionel)", min_value=0, value=st.session_state.get("max_days", 0), step=1, help="Laisser zéro pour le calcul automatique. Agit comme une limite supérieure.")
         desired_days = st.number_input("Nombre de jours souhaités (Optionnel)", min_value=0, value=st.session_state.get("desired_days", 0), step=1, help="Laissez à zéro pour ignorer. Le planning sera ajusté pour correspondre à ce nombre si possible.")
         
         st.divider()
