@@ -3143,16 +3143,16 @@ with tab3:
                 "sites": (st.session_state.sites_df.to_dict(orient="records") if "sites_df" in st.session_state else []),
                 "start_date": start_date.strftime("%Y-%m-%d") if isinstance(start_date, datetime) else str(start_date),
                 "max_days": int(max_days),
-                "start_activity_time": start_activity_time.strftime("%H:%M"),
-                "end_activity_time": end_activity_time.strftime("%H:%M"),
-                "start_travel_time": start_travel_time.strftime("%H:%M"),
-                "end_travel_time": end_travel_time.strftime("%H:%M"),
+                "start_activity_time": (start_activity_time.strftime("%H:%M") if start_activity_time else None),
+                "end_activity_time": (end_activity_time.strftime("%H:%M") if end_activity_time else None),
+                "start_travel_time": (start_travel_time.strftime("%H:%M") if start_travel_time else None),
+                "end_travel_time": (end_travel_time.strftime("%H:%M") if end_travel_time else None),
                 "tolerance_hours": float(tolerance_hours),
                 "use_lunch": bool(use_lunch),
-                "lunch_start_time": (lunch_start_time.strftime("%H:%M") if use_lunch else None),
-                "lunch_end_time": (lunch_end_time.strftime("%H:%M") if use_lunch else None),
+                "lunch_start_time": (lunch_start_time.strftime("%H:%M") if use_lunch and lunch_start_time else None),
+                "lunch_end_time": (lunch_end_time.strftime("%H:%M") if use_lunch and lunch_end_time else None),
                 "use_prayer": bool(use_prayer),
-                "prayer_start_time": (prayer_start_time.strftime("%H:%M") if use_prayer else None),
+                "prayer_start_time": (prayer_start_time.strftime("%H:%M") if use_prayer and prayer_start_time else None),
                 "prayer_duration_min": (int(prayer_duration_min) if use_prayer else None),
                 "distance_method": distance_method,
             }
@@ -3538,25 +3538,50 @@ if plan_button:
         st.warning(f"📊 Méthode: {calculation_method}")
     
     else:
-        # Mode Auto: Automatique → (Maps si coché) → Géométrique
-        result, error_msg = improved_deepseek_estimate_matrix(city_list, deepseek_api_key, debug_mode)
-        if result:
-            durations_sec, distances_m = result
-            calculation_method = "Automatique"
-        else:
-            if use_deepseek_fallback and graphhopper_api_key:
-                # Tentative 2: Maps
-                durations_sec, distances_m, error_msg = improved_graphhopper_duration_matrix(graphhopper_api_key, coords)
-                if durations_sec is not None:
-                    calculation_method = "Maps"
+        # Mode Auto: comportement dynamique
+        # - Site unique → privilégier Maps en premier (plus précis)
+        # - Plusieurs sites → privilégier Automatique, puis Maps (si activé), puis Géométrique
+        single_site = len(sites) == 1
+
+        if single_site and graphhopper_api_key:
+            # Tentative prioritaire: Maps
+            update_animation_step(2, "🗺️", distance_messages[1], [1])
+            durations_sec, distances_m, error_msg = improved_graphhopper_duration_matrix(graphhopper_api_key, coords)
+            if durations_sec is not None:
+                calculation_method = "Maps"
+            else:
+                # Fallback: Automatique si disponible, sinon Géométrique
+                if deepseek_api_key:
+                    result, _ = improved_deepseek_estimate_matrix(city_list, deepseek_api_key, debug_mode)
+                    if result:
+                        durations_sec, distances_m = result
+                        calculation_method = "Automatique"
+                    else:
+                        durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
+                        calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
                 else:
-                    # Tentative 3: Géométrique
                     durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
                     calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
+        else:
+            # Comportement Auto standard pour plusieurs sites: Automatique → Maps (si coché) → Géométrique
+            result, error_msg = improved_deepseek_estimate_matrix(city_list, deepseek_api_key, debug_mode)
+            if result:
+                durations_sec, distances_m = result
+                calculation_method = "Automatique"
             else:
-                # Sans fallback Maps, passer directement au géométrique
-                durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
-                calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
+                if use_deepseek_fallback and graphhopper_api_key:
+                    # Tentative 2: Maps
+                    durations_sec, distances_m, error_msg = improved_graphhopper_duration_matrix(graphhopper_api_key, coords)
+                    if durations_sec is not None:
+                        calculation_method = "Maps"
+                    else:
+                        # Tentative 3: Géométrique
+                        durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
+                        calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
+                else:
+                    # Sans fallback Maps, passer directement au géométrique
+                    durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
+                    calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
         
         method_color = "success" if "Maps" in calculation_method else "info" if "Automatique" in calculation_method else "warning"
         getattr(st, method_color)(f"📊 Méthode: {calculation_method}")
