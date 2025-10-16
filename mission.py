@@ -2212,10 +2212,30 @@ def schedule_itinerary(coords, sites, order, segments_summary,
             # Check if we need to end the day early
             time_until_end = (day_end_time - current_datetime).total_seconds() / 3600
             
-            # Si on doit "stretcher", on ne termine pas la journée plus tôt que prévu
-            if stretch_days and day_count < max_days:
-                pass  # On continue la journée pour l'étirer
-            
+            # Si on doit étaler, on termine la journée plus tôt pour répartir sur plus de jours
+            if stretch_days and day_count < max_days and idx < len(sites_ordered) - 1:
+                itinerary.append((day_count, current_datetime, current_datetime, f"🏁 Fin de journée"))
+                # Nuitée conditionnelle selon la possibilité
+                if overnight_allowed:
+                    itinerary.append((day_count, current_datetime, current_datetime, f"🏨 Nuitée à {city}"))
+                else:
+                    itinerary.append((day_count, current_datetime, current_datetime, f"⚠️ Déplacement nécessaire - pas d'hébergement à {city}"))
+                    # Chercher une nuitée autorisée dans les sites suivants ou la base
+                    fallback_city = None
+                    for j in range(idx+1, len(sites_ordered)):
+                        if sites_ordered[j].get('Possibilité de nuitée', True):
+                            fallback_city = sites_ordered[j]['Ville']
+                            break
+                    if not fallback_city and base_location:
+                        fallback_city = base_location
+                    if fallback_city:
+                        itinerary.append((day_count, current_datetime, current_datetime, f"🏨 Nuitée à {fallback_city}"))
+
+                # Démarrer le jour suivant
+                day_count += 1
+                current_datetime = datetime.combine(start_date + timedelta(days=day_count-1), start_activity_time)
+                day_end_time = datetime.combine(start_date + timedelta(days=day_count-1), end_travel_time)
+
             elif time_until_end <= end_day_early_threshold and idx < len(sites_ordered) - 1:
                 # End current day and prepare for next day
                 itinerary.append((day_count, current_datetime, current_datetime, f"🏁 Fin de journée"))
@@ -3662,13 +3682,19 @@ if plan_button:
             effective_max_days = user_max
         else:
             effective_max_days = user_desired
-        
+
         if effective_max_days < optimal_days:
-            stretch_days_flag = True
-            st.warning(f"⚠️ Objectif ({effective_max_days} jours) < optimal ({optimal_days}). Compression avec journées étirées.")
-        else:
+            # Cas compression: on tente de tenir en moins de jours (journées plus chargées)
             stretch_days_flag = False
-            st.success(f"✅ Planning ajusté à {effective_max_days} jours comme souhaité.")
+            st.warning(f"⚠️ Objectif ({effective_max_days} jours) < optimal ({optimal_days}). Compression: journées potentiellement plus chargées.")
+        elif effective_max_days > optimal_days:
+            # Cas étalement: on répartit sur plus de jours, fin de journée plus tôt
+            stretch_days_flag = True
+            st.success(f"✅ Planning étalé sur {effective_max_days} jours (optimal: {optimal_days}). Journées plus légères.")
+        else:
+            # Égal à l'optimal
+            stretch_days_flag = False
+            st.info(f"🟰 Planning sur {effective_max_days} jours, égal à l'optimal.")
 
     elif user_max > 0:
         if user_max < optimal_days:
