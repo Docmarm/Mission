@@ -1880,8 +1880,10 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                        start_travel_time, end_travel_time,
                        use_lunch, lunch_start_time, lunch_end_time,
                        use_prayer, prayer_start_time, prayer_duration_min,
-                        max_days, tolerance_hours=1.0, base_location=None, 
-                        stretch_days=False, end_day_early_threshold=1.5):
+                       max_days=0, tolerance_hours=1.0, base_location=None, 
+                       stretch_days=False, end_day_early_threshold=1.5,
+                       allow_weekend_travel=True, allow_weekend_activities=True,
+                       lunch_duration_min=60):
     """Génère le planning détaillé avec horaires différenciés pour activités et voyages"""
     sites_ordered = [sites[i] for i in order]
     coords_ordered = [coords[i] for i in order]
@@ -1901,6 +1903,14 @@ def schedule_itinerary(coords, sites, order, segments_summary,
     for idx, site in enumerate(sites_ordered):
         # Handle travel to this site (except for first site)
         if idx > 0:
+            # Weekend skip for travel if disabled
+            if not allow_weekend_travel:
+                while current_datetime.weekday() >= 5:
+                    itinerary.append((day_count, current_datetime, datetime.combine(current_datetime.date(), end_travel_time), "⛱️ Week-end (pas de voyage)"))
+                    day_count += 1
+                    current_datetime = datetime.combine(start_date + timedelta(days=day_count-1), start_travel_time)
+                    day_end_time = datetime.combine(start_date + timedelta(days=day_count-1), end_travel_time)
+            seg_idx = idx - 1
             seg_idx = idx - 1
             if seg_idx < len(segments_summary):
                 seg = segments_summary[seg_idx]
@@ -1984,8 +1994,8 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                             
                             # Placer le déjeuner immédiatement à l'arrivée
                             lunch_time = max(travel_end, lunch_window_start)
-                            lunch_end_time_actual = min(lunch_time + timedelta(hours=1), lunch_window_end)
-                            itinerary.append((day_count, lunch_time, lunch_end_time_actual, "🍽️ Déjeuner (≤1h)"))
+                            lunch_end_time_actual = min(lunch_time + timedelta(minutes=lunch_duration_min), lunch_window_end)
+                            itinerary.append((day_count, lunch_time, lunch_end_time_actual, f"🍽️ Déjeuner (≤{lunch_duration_min} min)"))
                             daily_lunch_added[day_count] = True
                             
                             # Mettre à jour l'heure courante à la fin du déjeuner
@@ -1995,7 +2005,7 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                         else:
                             # Sinon, conserver l’ancienne logique (pause pendant le trajet)
                             lunch_time = max(current_datetime, lunch_window_start)
-                            lunch_end_time_actual = min(lunch_time + timedelta(hours=1), lunch_window_end)
+                            lunch_end_time_actual = min(lunch_time + timedelta(minutes=lunch_duration_min), lunch_window_end)
                             
                             # Ajouter la partie de trajet avant la pause si nécessaire
                             if lunch_time > current_datetime:
@@ -2003,7 +2013,7 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                                 travel_added = True
                             
                             # Ajouter la pause déjeuner
-                            itinerary.append((day_count, lunch_time, lunch_end_time_actual, "🍽️ Déjeuner (≤1h)"))
+                            itinerary.append((day_count, lunch_time, lunch_end_time_actual, f"🍽️ Déjeuner (≤{lunch_duration_min} min)"))
                             daily_lunch_added[day_count] = True
                             
                             # Reprendre le trajet après la pause
@@ -2048,6 +2058,13 @@ def schedule_itinerary(coords, sites, order, segments_summary,
         visit_hours = float(site.get("Durée (h)", 0)) if site.get("Durée (h)") else 0
         
         if visit_hours > 0:
+            # Weekend skip for activities if disabled
+            if not allow_weekend_activities:
+                while current_datetime.weekday() >= 5:
+                    itinerary.append((day_count, current_datetime, datetime.combine(current_datetime.date(), end_activity_time), "⛱️ Week-end (pas d'activités)"))
+                    day_count += 1
+                    current_datetime = datetime.combine(start_date + timedelta(days=day_count-1), start_activity_time)
+                    day_end_time = datetime.combine(start_date + timedelta(days=day_count-1), end_travel_time)
             total_visit_hours += visit_hours
             visit_duration = timedelta(hours=visit_hours)
             visit_end = current_datetime + visit_duration
@@ -2168,14 +2185,14 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                 if use_lunch and lunch_window_start and lunch_window_end and not daily_lunch_added.get(day_count, False):
                     if current_datetime < lunch_window_end and visit_end > lunch_window_start:
                         lunch_time = max(current_datetime, lunch_window_start)
-                        lunch_end_time_actual = min(lunch_time + timedelta(hours=1), lunch_window_end)
+                        lunch_end_time_actual = min(lunch_time + timedelta(minutes=lunch_duration_min), lunch_window_end)
                         
                         # Add visit part before lunch
                         if lunch_time > current_datetime:
                             itinerary.append((day_count, current_datetime, lunch_time, visit_desc))
                         
                         # Add lunch break
-                        itinerary.append((day_count, lunch_time, lunch_end_time_actual, "🍽️ Déjeuner (≤1h)"))
+                        itinerary.append((day_count, lunch_time, lunch_end_time_actual, f"🍽️ Déjeuner (≤{lunch_duration_min} min)"))
                         daily_lunch_added[day_count] = True  # Marquer le déjeuner comme ajouté pour ce jour
                         
                         # Update timing for remaining visit
@@ -2289,7 +2306,7 @@ def schedule_itinerary(coords, sites, order, segments_summary,
     
     return itinerary, sites_ordered, coords_ordered, stats
 
-def build_professional_html(itinerary, start_date, stats, sites_ordered, segments_summary=None, speed_kmh=110, mission_title="Mission Terrain", coords_ordered=None):
+def build_professional_html(itinerary, start_date, stats, sites_ordered, segments_summary=None, speed_kmh=110, mission_title="Mission Terrain", coords_ordered=None, include_map=False, lunch_start_time=None, lunch_end_time=None, lunch_duration_min=60, prayer_start_time=None, prayer_duration_min=20):
     """Génère un HTML professionnel"""
     def fmt_time(dt):
         return dt.strftime("%Hh%M")
@@ -2441,15 +2458,15 @@ def build_professional_html(itinerary, start_date, stats, sites_ordered, segment
                 transport_info = "-"
             elif "déjeuner" in desc.lower() and "prière" in desc.lower():
                 activity_class = "activite"
-                activity_text = "🍽️ Déjeuner (≤1h) + 🙏 Prière (≤20 min)"
+                activity_text = desc
                 transport_info = "-"
             elif "déjeuner" in desc.lower():
                 activity_class = "activite"
-                activity_text = "🍽️ Déjeuner (≤1h)"
+                activity_text = desc
                 transport_info = "-"
             elif "prière" in desc.lower():
                 activity_class = "activite"
-                activity_text = "🙏 Prière (≤20 min)"
+                activity_text = desc
                 transport_info = "-"
             elif "installation" in desc.lower() or "arrivée" in desc.lower():
                 activity_class = "activite"
@@ -2485,13 +2502,13 @@ def build_professional_html(itinerary, start_date, stats, sites_ordered, segment
         </tbody>
     </table>
 
-    <p class="note">ℹ️ Distances/temps indicatifs. Déjeuner (13h00–14h30, ≤1h) et prière (14h00–15h00, ≤20 min) sont flexibles et intégrés sans bloquer les activités.</p>
+    <p class="note">ℹ️ Distances/temps indicatifs. Les pauses déjeuner et prière sont flexibles et intégrées sans bloquer les activités.</p>
 """
 
-    # Intégrer la carte en-dessous du tableau si coords_ordered est fourni
+    # Intégrer la carte en-dessous du tableau si coords_ordered est fourni (optionnel)
     map_embed_html = ""
     try:
-        if coords_ordered and len(coords_ordered) > 0:
+        if include_map and coords_ordered and len(coords_ordered) > 0:
             center_lat = sum(c[1] for c in coords_ordered) / len(coords_ordered)
             center_lon = sum(c[0] for c in coords_ordered) / len(coords_ordered)
 
@@ -3097,6 +3114,19 @@ with tab2:
         with col_travel2:
             end_travel_time = st.time_input("Fin voyages", value=st.session_state.get("end_travel_time", time(19, 0)))
         
+        # Options week-end
+        st.markdown("**Options week-end**")
+        allow_weekend_travel = st.checkbox(
+            "Autoriser les voyages le week-end",
+            value=st.session_state.get("allow_weekend_travel", True)
+        )
+        allow_weekend_activities = st.checkbox(
+            "Autoriser les activités le week-end",
+            value=st.session_state.get("allow_weekend_activities", True)
+        )
+        st.session_state.allow_weekend_travel = allow_weekend_travel
+        st.session_state.allow_weekend_activities = allow_weekend_activities
+        
         st.divider()
         
         # Gestion des activités longues
@@ -3133,6 +3163,14 @@ with tab3:
             st.markdown("**Fenêtre de déjeuner**")
             lunch_start_time = st.time_input("Début fenêtre", value=st.session_state.get("lunch_start_time", time(12, 30)), key="lunch_start")
             lunch_end_time = st.time_input("Fin fenêtre", value=st.session_state.get("lunch_end_time", time(15, 0)), key="lunch_end")
+            lunch_duration_min = st.number_input(
+                "Durée pause (min)",
+                min_value=5,
+                max_value=180,
+                step=5,
+                value=st.session_state.get("lunch_duration_min", 60),
+                key="lunch_duration"
+            )
     
     with col2:
         use_prayer = st.checkbox("Pause prière", value=st.session_state.get("use_prayer", False))
@@ -3161,6 +3199,7 @@ with tab3:
                 "use_lunch": bool(use_lunch),
                 "lunch_start_time": (lunch_start_time.strftime("%H:%M") if use_lunch and lunch_start_time else None),
                 "lunch_end_time": (lunch_end_time.strftime("%H:%M") if use_lunch and lunch_end_time else None),
+                "lunch_duration_min": (int(lunch_duration_min) if use_lunch else None),
                 "use_prayer": bool(use_prayer),
                 "prayer_start_time": (prayer_start_time.strftime("%H:%M") if use_prayer and prayer_start_time else None),
                 "prayer_duration_min": (int(prayer_duration_min) if use_prayer else None),
@@ -3216,6 +3255,7 @@ with tab3:
                     st.session_state.use_lunch = imported.get("use_lunch", use_lunch)
                     st.session_state.lunch_start_time = parse_time(imported.get("lunch_start_time"), lunch_start_time)
                     st.session_state.lunch_end_time = parse_time(imported.get("lunch_end_time"), lunch_end_time)
+                    st.session_state.lunch_duration_min = imported.get("lunch_duration_min", st.session_state.get("lunch_duration_min", 60))
                     st.session_state.use_prayer = imported.get("use_prayer", use_prayer)
                     st.session_state.prayer_start_time = parse_time(imported.get("prayer_start_time"), prayer_start_time)
                     st.session_state.prayer_duration_min = imported.get("prayer_duration_min", prayer_duration_min)
@@ -3249,6 +3289,7 @@ if plan_button:
     st.session_state.use_lunch = use_lunch
     st.session_state.lunch_start_time = lunch_start_time if use_lunch else None
     st.session_state.lunch_end_time = lunch_end_time if use_lunch else None
+    st.session_state.lunch_duration_min = lunch_duration_min if use_lunch else None
     st.session_state.use_prayer = use_prayer
     st.session_state.prayer_start_time = prayer_start_time if use_prayer else None
     st.session_state.prayer_duration_min = prayer_duration_min if use_prayer else None
@@ -3736,9 +3777,12 @@ if plan_button:
         use_prayer=use_prayer,
         prayer_start_time=prayer_start_time if use_prayer else time(14,0),
         prayer_duration_min=prayer_duration_min if use_prayer else 20,
+        lunch_duration_min=st.session_state.get("lunch_duration_min", 60),
         max_days=0,
         tolerance_hours=tolerance_hours,
-        base_location=base_location
+        base_location=base_location,
+        allow_weekend_travel=allow_weekend_travel,
+        allow_weekend_activities=allow_weekend_activities
     )
 
     optimal_days = int(dry_stats.get('total_days', 1))
@@ -3797,10 +3841,13 @@ if plan_button:
         use_prayer=use_prayer,
         prayer_start_time=prayer_start_time if use_prayer else time(14,0),
         prayer_duration_min=prayer_duration_min if use_prayer else 20,
+        lunch_duration_min=st.session_state.get("lunch_duration_min", 60),
         max_days=effective_max_days,
         tolerance_hours=tolerance_hours,
         base_location=base_location,
-        stretch_days=stretch_days_flag
+        stretch_days=stretch_days_flag,
+        allow_weekend_travel=allow_weekend_travel,
+        allow_weekend_activities=allow_weekend_activities
     )
 
     if stretch_days_flag and stats.get('total_days', 0) > effective_max_days:
@@ -3880,7 +3927,25 @@ if st.session_state.planning_results:
         )
         
         if view_mode == "🎨 Présentation professionnelle":
-            html_str = build_professional_html(itinerary, start_date, stats, sites_ordered, segments_summary, default_speed_kmh, mission_title, coords_ordered)
+            include_map_prof = st.checkbox("Inclure la carte", value=st.session_state.get("include_map_prof_html", False))
+            st.session_state.include_map_prof_html = include_map_prof
+
+            html_str = build_professional_html(
+                itinerary,
+                start_date,
+                stats,
+                sites_ordered,
+                segments_summary,
+                default_speed_kmh,
+                mission_title,
+                coords_ordered,
+                include_map=include_map_prof,
+                lunch_start_time=st.session_state.get("lunch_start_time"),
+                lunch_end_time=st.session_state.get("lunch_end_time"),
+                lunch_duration_min=st.session_state.get("lunch_duration_min", 60),
+                prayer_start_time=st.session_state.get("prayer_start_time"),
+                prayer_duration_min=st.session_state.get("prayer_duration_min", 20)
+            )
             st.components.v1.html(html_str, height=1100, scrolling=True)
             
             col_html, col_pdf = st.columns(2)
@@ -4836,9 +4901,12 @@ if st.session_state.planning_results:
                         use_prayer=False,
                         prayer_start_time=time(14, 0),
                         prayer_duration_min=20,
+                        lunch_duration_min=st.session_state.get('lunch_duration_min', 60),
                         max_days=0,
                         tolerance_hours=1.0,
-                        base_location=results.get('base_location', '')
+                        base_location=results.get('base_location', ''),
+                        allow_weekend_travel=st.session_state.get('allow_weekend_travel', True),
+                        allow_weekend_activities=st.session_state.get('allow_weekend_activities', True)
                     )
 
                     new_optimal_days = int(new_dry_stats.get('total_days', 1))
@@ -4891,10 +4959,13 @@ if st.session_state.planning_results:
                         use_prayer=False,
                         prayer_start_time=time(14, 0),
                         prayer_duration_min=20,
+                        lunch_duration_min=st.session_state.get('lunch_duration_min', 60),
                         max_days=new_effective_days,
                         tolerance_hours=1.0,
                         base_location=results.get('base_location', ''),
-                        stretch_days=new_stretch
+                        stretch_days=new_stretch,
+                        allow_weekend_travel=st.session_state.get('allow_weekend_travel', True),
+                        allow_weekend_activities=st.session_state.get('allow_weekend_activities', True)
                     )
 
                     if new_stretch and new_stats.get('total_days', 0) > new_effective_days:
@@ -5139,7 +5210,22 @@ if st.session_state.planning_results:
             )
         
         with col_html:
-            html_export = build_professional_html(current_itinerary, start_date, stats, sites_ordered, segments_summary, default_speed_kmh, mission_title, coords_ordered)
+            html_export = build_professional_html(
+                current_itinerary,
+                start_date,
+                stats,
+                sites_ordered,
+                segments_summary,
+                default_speed_kmh,
+                mission_title,
+                coords_ordered,
+                include_map=st.session_state.get("include_map_prof_html", False),
+                lunch_start_time=st.session_state.get("lunch_start_time"),
+                lunch_end_time=st.session_state.get("lunch_end_time"),
+                lunch_duration_min=st.session_state.get("lunch_duration_min", 60),
+                prayer_start_time=st.session_state.get("prayer_start_time"),
+                prayer_duration_min=st.session_state.get("prayer_duration_min", 20)
+            )
             st.download_button(
                 label="📥 Télécharger HTML",
                 data=html_export,
