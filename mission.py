@@ -106,7 +106,13 @@ else:
 st.sidebar.subheader("Calcul des distances")
 distance_method = st.sidebar.radio(
     "Méthode de calcul",
-    ["Auto (Automatique puis Maps puis Géométrique)", "Automatique uniquement", "Géométrique uniquement", "Maps uniquement (plus précis)"],
+    [
+        "Auto (OSRM → Automatique → Maps → Géométrique)",
+        "Automatique uniquement",
+        "OSRM uniquement (rapide)",
+        "Géométrique uniquement",
+        "Maps uniquement (précis)"
+    ],
     index=0
 )
 
@@ -130,6 +136,7 @@ with st.sidebar.expander("Options avancées"):
     config_speed = secrets_settings.get("default_speed_kmh")
     config_cache = secrets_settings.get("use_cache")
     config_debug = secrets_settings.get("debug_mode")
+    config_osrm = secrets_settings.get("osrm_base_url")
 
     if config_speed is None:
         config_speed = local_config.get('settings', {}).get('default_speed_kmh', 95)
@@ -137,13 +144,26 @@ with st.sidebar.expander("Options avancées"):
         config_cache = local_config.get('settings', {}).get('use_cache', True)
     if config_debug is None:
         config_debug = local_config.get('settings', {}).get('debug_mode', False)
+    if config_osrm is None:
+        config_osrm = local_config.get('settings', {}).get('osrm_base_url', "https://router.project-osrm.org")
     
     default_speed_kmh = st.number_input(
         "Vitesse moyenne (km/h) pour estimations", 
         min_value=20, max_value=120, value=config_speed
     )
     use_cache = st.checkbox("Utiliser le cache pour géocodage", value=config_cache)
+    prefer_offline_geocoding = st.checkbox(
+        "Prioriser coordonnées locales pour grandes villes",
+        value=True,
+        key="prefer_offline_geocoding",
+        help="Utiliser des coordonnées vérifiées pour grandes villes du Sénégal (ex. Dakar, Louga, Touba)."
+    )
     debug_mode = st.checkbox("Mode debug (afficher détails calculs)", value=config_debug)
+    osrm_base_url = st.text_input(
+        "OSRM base URL",
+        value=config_osrm,
+        help="Exemple: http://localhost:5000 ou https://router.project-osrm.org"
+    )
 
 # --------------------------
 # ÉTAT DE SESSION
@@ -1368,6 +1388,72 @@ def improved_graphhopper_duration_matrix(api_key, coords):
     except Exception as e:
         return None, None, f"Erreur: {str(e)}"
 
+@st.cache_data(ttl=_get_matrix_ttl_seconds(), show_spinner=False)
+def improved_osrm_duration_matrix(base_url, coords):
+    """Calcul de matrice via OSRM Table avec gestion d'erreurs et fallback distances.
+    Retourne (durations_sec, distances_m, message).
+    """
+    if not base_url:
+        return None, None, "URL de base OSRM manquante"
+    try:
+        if len(coords) > 100:
+            return None, None, f"Trop de points ({len(coords)}), limite recommandée: 100"
+        # Préparer la chaîne de coordonnées pour l'API OSRM
+        try:
+            coord_str = ';'.join([f"{c[0]},{c[1]}" for c in coords])
+        except Exception:
+            return None, None, "Coordonnées invalides"
+        url = f"{base_url.rstrip('/')}/table/v1/driving/{coord_str}"
+        params = {"annotations": "duration,distance"}
+        headers = {"Accept": "application/json"}
+
+        last_error = None
+        for attempt in range(3):
+            try:
+                response = requests.get(url, params=params, headers=headers, timeout=30)
+            except Exception as e:
+                last_error = str(e)
+                time_module.sleep(1 + attempt)
+                continue
+            if response.status_code == 200:
+                result = response.json()
+                durations = result.get("durations")
+                distances = result.get("distances")
+                if durations is None:
+                    return None, None, "Données manquantes: durations"
+                # OSRM fournit les durées en secondes; distances en mètres si activées
+                if distances is None:
+                    # Fallback distances via Haversine (corrigé 1.2) si non fournies
+                    n = len(coords)
+                    distances = [[0.0]*n for _ in range(n)]
+                    for i in range(n):
+                        for j in range(n):
+                            if i != j:
+                                km = haversine(coords[i][0], coords[i][1], coords[j][0], coords[j][1]) * 1.2
+                                distances[i][j] = km * 1000.0
+                return durations, distances, "Succès"
+            else:
+                if response.status_code == 429:
+                    last_error = "Limite de requêtes atteinte (OSRM)"
+                    time_module.sleep(2 + attempt)
+                    continue
+                elif 500 <= response.status_code < 600:
+                    last_error = f"Erreur HTTP {response.status_code} (OSRM)"
+                    time_module.sleep(1 + attempt)
+                    continue
+                elif response.status_code == 400:
+                    try:
+                        err = response.json()
+                        msg = err.get('message') or err.get('error') or 'Requête invalide (OSRM)'
+                        return None, None, f"Erreur HTTP 400: {msg}"
+                    except Exception:
+                        return None, None, "Erreur HTTP 400: Requête invalide (OSRM)"
+                else:
+                    return None, None, f"Erreur HTTP {response.status_code} (OSRM)"
+        return None, None, f"Échec après retries: {last_error or 'Erreur inconnue'}"
+    except Exception as e:
+        return None, None, f"Erreur: {str(e)}"
+
 def _get_deepseek_matrix_ttl_seconds():
     """TTL pour le cache de matrices DeepSeek (par défaut 6h)."""
     try:
@@ -1559,9 +1645,10 @@ def _offline_lookup_city_coords(city: str):
     return SENEGAL_CITY_COORDS.get(key)
 
 def _graphhopper_geocode(city: str):
-    """Fallback via GraphHopper Geocoding API si disponible."""
+    """Fallback via GraphHopper Geocoding API si disponible.
+    Sélectionne en priorité les lieux de type city/town/village au Sénégal.
+    """
     try:
-        # Utilise la clé déjà chargée dans le module si disponible
         gh_key = globals().get("graphhopper_api_key")
         if not gh_key:
             return None
@@ -1569,37 +1656,57 @@ def _graphhopper_geocode(city: str):
         params = {
             "q": f"{city}, Senegal",
             "locale": "fr",
-            "limit": 5,  # quelques hits pour filtrer le pays
+            "limit": 8,
             "key": gh_key,
         }
         resp = requests.get(url, params=params, timeout=10)
         if resp.status_code != 200:
             return None
-        data = resp.json()
-        hits = data.get("hits", []) or []
+        hits = (resp.json().get("hits") or [])
         if not hits:
             return None
-        # Tente de sélectionner un résultat au Sénégal
+        def is_sn(h):
+            country = (h.get("country") or h.get("countrycode") or "").lower()
+            return country in ("senegal", "sénégal", "sn")
+        def is_place(h):
+            return (h.get("osm_key", "").lower() == "place" and (h.get("osm_value", "").lower() in ("city", "town", "village")))
         chosen = None
         for h in hits:
-            country = (h.get("country") or h.get("countrycode") or "").lower()
-            if country in ("senegal", "sénégal", "sn"):
+            if is_sn(h) and is_place(h):
                 chosen = h
                 break
+        if not chosen:
+            for h in hits:
+                if is_sn(h):
+                    chosen = h
+                    break
         chosen = chosen or hits[0]
         pt = chosen.get("point") or {}
         lat = pt.get("lat")
         lng = pt.get("lng")
         if lat is None or lng is None:
             return None
+        # Valide que le point est dans un bbox raisonnable pour le Sénégal
+        if not (-17.8 <= float(lng) <= -11.0 and 12.0 <= float(lat) <= 16.9):
+            return None
         return (float(lng), float(lat))
     except Exception:
         return None
 
 def _geocode_city_senegal_raw(city: str):
-    """Implémentation brute sans cache (avec ressource + retries)."""
+    """Implémentation brute sans cache (avec ressource + retries). Privilégie coordonnées locales si activé."""
     if not city or not isinstance(city, str) or not city.strip():
         return None
+
+    # Option: préférer coordonnées locales pour grandes villes (fiabilité)
+    try:
+        prefer_offline = st.session_state.get("prefer_offline_geocoding", True)
+    except Exception:
+        prefer_offline = True
+    if prefer_offline:
+        offline = _offline_lookup_city_coords(city)
+        if offline:
+            return offline
 
     last_error = None
     for attempt in range(3):  # 3 tentatives
@@ -1615,7 +1722,19 @@ def _geocode_city_senegal_raw(city: str):
                 loc = rate_limited(city, language="fr")
             
             if loc:
-                return (loc.longitude, loc.latitude)
+                lon, lat = (loc.longitude, loc.latitude)
+                # Vérifie le type renvoyé par Nominatim si disponible
+                try:
+                    raw = getattr(loc, "raw", {}) or {}
+                    place_type = (raw.get("type") or "").lower()
+                    if place_type and place_type not in ("city", "town", "village", "hamlet"):
+                        raise ValueError(f"Résultat non-ville: {place_type}")
+                except Exception:
+                    pass
+                # Valide que les coordonnées sont plausibles pour le Sénégal
+                if not (-17.8 <= float(lon) <= -11.0 and 12.0 <= float(lat) <= 16.9):
+                    raise ValueError("Coordonnées hors Sénégal")
+                return (lon, lat)
         
         except ConnectionRefusedError as e:
             last_error = f"Connexion refusée au service de géocodage. Vérifiez votre connexion ou l'état du service. ({e})"
@@ -1628,13 +1747,13 @@ def _geocode_city_senegal_raw(city: str):
     # Fallback 1: GraphHopper (si clé dispo)
     gh_coords = _graphhopper_geocode(city)
     if gh_coords:
-        st.warning(f"Géocodage Nominatim indisponible. Fallback GraphHopper utilisé pour {city}.")
+        st.warning(f"Géocodage Nominatim indisponible/inexact. Fallback GraphHopper utilisé pour {city}.")
         return gh_coords
 
     # Fallback 2: Dictionnaire hors-ligne
     offline = _offline_lookup_city_coords(city)
     if offline:
-        st.info(f"Mode hors-ligne: coordonnées approximatives utilisées pour {city}.")
+        st.info(f"Mode hors-ligne: coordonnées vérifiées utilisées pour {city}.")
         return offline
 
     st.error(f"Erreur de géocodage persistante pour {city} après plusieurs tentatives: {last_error}")
@@ -1733,6 +1852,79 @@ def two_opt_fixed_start_end(path, matrix):
             if improved:
                 break
     return path
+
+# OR-Tools integration for advanced optimization (TSP with fixed start/end)
+try:
+    from ortools.constraint_solver import pywrapcp, routing_enums_pb2
+    ORTOOLS_AVAILABLE = True
+except Exception:
+    ORTOOLS_AVAILABLE = False
+
+
+def solve_tsp_ortools_fixed_start_end(matrix, service_times=None, time_limit_s=5):
+    """Optimise l'ordre via OR-Tools (TSP), départ 0 et arrivée n-1 fixés.
+    - Utilise la matrice des durées (secondes)
+    - Peut intégrer les durées de visite (service_times, en secondes) sur chaque site
+    - Retourne un chemin sous forme d'indices: [0, ..., n-1]
+    """
+    n = len(matrix)
+    if n <= 2:
+        return list(range(n))
+
+    # Si OR-Tools indisponible, fallback sur l'implémentation TSP existante
+    if not ORTOOLS_AVAILABLE:
+        return solve_tsp_fixed_start_end(matrix)
+
+    try:
+        manager = pywrapcp.RoutingIndexManager(n, 1, 0, n-1)
+        routing = pywrapcp.RoutingModel(manager)
+
+        def time_callback(from_index, to_index):
+            from_node = manager.IndexToNode(from_index)
+            to_node = manager.IndexToNode(to_index)
+            travel = int(matrix[from_node][to_node] or 0)
+            service = 0
+            if service_times and isinstance(service_times, (list, tuple)):
+                if 0 <= from_node < n and from_node not in (0, n - 1):
+                    st_value = service_times[from_node]
+                    try:
+                        service = int(float(st_value) if st_value is not None else 0)
+                    except Exception:
+                        service = 0
+            return travel + service
+
+        transit_cb = routing.RegisterTransitCallback(time_callback)
+        routing.SetArcCostEvaluatorOfAllVehicles(transit_cb)
+
+        # Dimension de temps simple (horizon large)
+        routing.AddDimension(
+            transit_cb,
+            0,            # marge
+            24 * 3600,    # horizon max (24h)
+            True,         # cumul de départ à 0
+            "Time"
+        )
+
+        search_params = pywrapcp.DefaultRoutingSearchParameters()
+        search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+        search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+        search_params.time_limit.seconds = int(time_limit_s)
+
+        solution = routing.SolveWithParameters(search_params)
+        if solution:
+            index = routing.Start(0)
+            path = []
+            while not routing.IsEnd(index):
+                node = manager.IndexToNode(index)
+                path.append(node)
+                index = solution.Value(routing.NextVar(index))
+            path.append(manager.IndexToNode(index))
+            return path
+    except Exception:
+        pass
+
+    # Fallback en cas d'échec
+    return solve_tsp_fixed_start_end(matrix)
 
 def haversine(lon1, lat1, lon2, lat2):
     """Calcule la distance géodésique entre deux points en kilomètres"""
@@ -2181,28 +2373,14 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                 prayer_window_start = datetime.combine(current_datetime.date(), prayer_start_time) if use_prayer else None
                 prayer_window_end = prayer_window_start + timedelta(hours=2) if use_prayer else None
                 
-                # Check for lunch break during visit
+                # Check for lunch break during visit — do not split, schedule lunch after visit
+                place_lunch_after_visit = False
                 if use_lunch and lunch_window_start and lunch_window_end and not daily_lunch_added.get(day_count, False):
                     if current_datetime < lunch_window_end and visit_end > lunch_window_start:
-                        lunch_time = max(current_datetime, lunch_window_start)
-                        lunch_end_time_actual = min(lunch_time + timedelta(minutes=lunch_duration_min), lunch_window_end)
-                        
-                        # Add visit part before lunch
-                        if lunch_time > current_datetime:
-                            itinerary.append((day_count, current_datetime, lunch_time, visit_desc))
-                        
-                        # Add lunch break
-                        itinerary.append((day_count, lunch_time, lunch_end_time_actual, f"🍽️ Déjeuner (≤{lunch_duration_min} min)"))
-                        daily_lunch_added[day_count] = True  # Marquer le déjeuner comme ajouté pour ce jour
-                        
-                        # Update timing for remaining visit
-                        current_datetime = lunch_end_time_actual
-                        remaining_visit = visit_end - lunch_time
-                        visit_end = current_datetime + remaining_visit
-                        visit_desc = f"Suite {visit_desc}" if lunch_time > current_datetime else visit_desc
+                        place_lunch_after_visit = True
                 
-                # Check for prayer break during visit (only if no lunch break was added)
-                elif use_prayer and prayer_window_start and prayer_window_end and not daily_prayer_added.get(day_count, False):
+                # Check for prayer break during visit (only if no lunch is planned after visit)
+                if use_prayer and prayer_window_start and prayer_window_end and not daily_prayer_added.get(day_count, False) and not place_lunch_after_visit and not daily_lunch_added.get(day_count, False):
                     if current_datetime < prayer_window_end and visit_end > prayer_window_start:
                         prayer_time = max(current_datetime, prayer_window_start)
                         prayer_end_time = min(prayer_time + timedelta(minutes=prayer_duration_min), prayer_window_end)
@@ -2225,6 +2403,15 @@ def schedule_itinerary(coords, sites, order, segments_summary,
             if current_datetime < visit_end:
                 itinerary.append((day_count, current_datetime, visit_end, visit_desc))
                 current_datetime = visit_end
+            
+            # Place lunch right after the visit if the window overlapped
+            if 'place_lunch_after_visit' in locals() and place_lunch_after_visit and not daily_lunch_added.get(day_count, False):
+                lunch_time = max(current_datetime, lunch_window_start)
+                if lunch_time < lunch_window_end:
+                    lunch_end_time_actual = min(lunch_time + timedelta(minutes=lunch_duration_min), lunch_window_end)
+                    itinerary.append((day_count, lunch_time, lunch_end_time_actual, f"🍽️ Déjeuner (≤{lunch_duration_min} min)"))
+                    daily_lunch_added[day_count] = True
+                    current_datetime = lunch_end_time_actual
             
             # Check if we need to end the day early
             time_until_end = (day_end_time - current_datetime).total_seconds() / 3600
@@ -2306,7 +2493,7 @@ def schedule_itinerary(coords, sites, order, segments_summary,
     
     return itinerary, sites_ordered, coords_ordered, stats
 
-def build_professional_html(itinerary, start_date, stats, sites_ordered, segments_summary=None, speed_kmh=110, mission_title="Mission Terrain", coords_ordered=None, include_map=False, lunch_start_time=None, lunch_end_time=None, lunch_duration_min=60, prayer_start_time=None, prayer_duration_min=20):
+def build_professional_html(itinerary, start_date, stats, sites_ordered, segments_summary=None, speed_kmh=110, mission_title="Mission Terrain", coords_ordered=None, include_map=False, lunch_start_time=None, lunch_end_time=None, lunch_duration_min=60, prayer_start_time=None, prayer_duration_min=20, include_details=True):
     """Génère un HTML professionnel"""
     def fmt_time(dt):
         return dt.strftime("%Hh%M")
@@ -2385,6 +2572,13 @@ def build_professional_html(itinerary, start_date, stats, sites_ordered, segment
     date_range = f"{first_date.strftime('%d')} → {last_date.strftime('%d')} {months[last_date.month-1]} {last_date.year}"
     
     num_nights = stats['total_days'] - 1 if stats['total_days'] > 1 else 0
+
+    # KPIs et méta
+    actual_sites_count = len([s for s in sites_ordered if s.get('Type') != 'Base'])
+    distance_km = stats.get('total_km', 0)
+    total_visit_hours = stats.get('total_visit_hours', 0)
+    route_summary = " → ".join([s.get('Ville', '').upper() for s in sites_ordered if s.get('Ville')])
+    gen_date_str = datetime.now().strftime("%d/%m/%Y")
     
     html = f"""<!DOCTYPE html>
 <html lang="fr">
@@ -2393,10 +2587,14 @@ def build_professional_html(itinerary, start_date, stats, sites_ordered, segment
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Planning {mission_title} ({date_range})</title>
     <style>
-        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f5f5f5; }}
+        body {{ font-family: Tahoma, Calibri, 'Segoe UI', sans-serif; margin: 20px; background-color: #f5f5f5; }}
         .container {{ max-width: 1200px; margin: 0 auto; background: white; border-radius: 10px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
-        h1 {{ text-align: center; color: #2c3e50; margin-bottom: 6px; font-size: 24px; }}
+        h1 {{ text-align: center; color: #2c3e50; margin-bottom: 4px; font-size: 24px; }}
         p.subtitle {{ text-align: center; color: #7f8c8d; margin: 0 0 16px; font-size: 13px; }}
+        .kpi-grid {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin: 16px 0 18px; }}
+        .kpi {{ background:#f8f9fb; border:1px solid #e6e8eb; border-radius:8px; padding:10px 12px; text-align:center; }}
+        .kpi-label {{ color:#6c7a89; font-size:12px; }}
+        .kpi-value {{ color:#2c3e50; font-weight:bold; font-size:18px; }}
         table {{ width: 100%; border-collapse: collapse; margin-bottom: 10px; font-size: 14px; }}
         th {{ background-color: #34495e; color: white; padding: 12px 8px; text-align: left; font-weight: bold; }}
         td {{ padding: 10px 8px; border-bottom: 1px solid #ddd; vertical-align: top; }}
@@ -2411,12 +2609,26 @@ def build_professional_html(itinerary, start_date, stats, sites_ordered, segment
         .distance {{ color: #e74c3c; font-weight: bold; white-space: nowrap; }}
         .note {{ font-size: 12px; color: #7f8c8d; margin-top: 8px; }}
         .map-section {{ margin-top: 16px; }}
+        .section {{ margin-top: 20px; }}
+        .section h2 {{ color:#2c3e50; font-size:18px; margin-bottom:8px; }}
+        .section ul {{ margin:8px 0 0 18px; }}
+        .signatures {{ display:flex; gap:24px; margin-top:16px; }}
+        .signature-box {{ flex:1; border:1px dashed #bdc3c7; border-radius:8px; padding:12px; color:#34495e; }}
+        .footer {{ margin-top:14px; font-size:12px; color:#7f8c8d; }}
     </style>
 </head>
 <body>
 <div class="container">
     <h1>📋 {mission_title} – {date_range}</h1>
-    <p class="subtitle">{stats['total_days']} jours / {num_nights} nuitée{'s' if num_nights > 1 else ''} • Pauses flexibles : déjeuner (13h00–14h30 ≤ 1h) & prière (14h00–15h00 ≤ 20 min)</p>
+    <p class="subtitle">{stats['total_days']} jour{'s' if stats['total_days']>1 else ''} / {num_nights} nuitée{'s' if num_nights>1 else ''} • Pauses : déjeuner (13h00–14h30 ≤ 1h) & prière (14h00–15h00 ≤ 20 min)</p>
+
+    <div class="kpi-grid">
+        <div class="kpi"><div class="kpi-label">Durée</div><div class="kpi-value">{stats['total_days']} j</div></div>
+        <div class="kpi"><div class="kpi-label">Distance</div><div class="kpi-value">{distance_km:.1f} km</div></div>
+        <div class="kpi"><div class="kpi-label">Sites</div><div class="kpi-value">{actual_sites_count}</div></div>
+        <div class="kpi"><div class="kpi-label">Visites</div><div class="kpi-value">{total_visit_hours:.1f} h</div></div>
+        <div class="kpi"><div class="kpi-label">Nuitées</div><div class="kpi-value">{num_nights}</div></div>
+    </div>
 
     <table>
         <thead>
@@ -2505,6 +2717,23 @@ def build_professional_html(itinerary, start_date, stats, sites_ordered, segment
     <p class="note">ℹ️ Distances/temps indicatifs. Les pauses déjeuner et prière sont flexibles et intégrées sans bloquer les activités.</p>
 """
 
+    if include_details:
+        html += f"""
+    <div class="section">
+        <h2>📋 Résumé exécutif</h2>
+        <ul>
+            <li>Itinéraire: {route_summary}</li>
+            <li>Distance: {distance_km:.1f} km; Visites: {total_visit_hours:.1f} h; Sites: {actual_sites_count}</li>
+            <li>Période: {date_range}</li>
+        </ul>
+    </div>
+    <div class="section signatures">
+        <div class="signature-box">Préparé par: __________________<br/>Fonction: __________________<br/>Date: {gen_date_str}</div>
+        <div class="signature-box">Validé par: __________________<br/>Fonction: __________________<br/>Date: {gen_date_str}</div>
+    </div>
+    <div class="footer">App dev by Moctar TALL • Document généré le {gen_date_str}</div>
+"""
+
     # Intégrer la carte en-dessous du tableau si coords_ordered est fourni (optionnel)
     map_embed_html = ""
     try:
@@ -2517,7 +2746,7 @@ def build_professional_html(itinerary, start_date, stats, sites_ordered, segment
             # Route via OSRM, fallback sur ligne droite
             try:
                 coord_str = ";".join([f"{c[0]},{c[1]}" for c in coords_ordered])
-                url = f"https://router.project-osrm.org/route/v1/driving/{coord_str}?overview=full&geometries=geojson"
+                url = f"{osrm_base_url.rstrip('/')}/route/v1/driving/{coord_str}?overview=full&geometries=geojson"
                 resp = requests.get(url, timeout=10)
                 route_pts = None
                 if resp.status_code == 200:
@@ -3558,7 +3787,7 @@ if plan_button:
     calculation_method = ""
     city_list = [s["Ville"] for s in all_sites]
     
-    if distance_method == "Maps uniquement (plus précis)":
+    if distance_method.startswith("Maps uniquement"):
         update_animation_step(2, "🗺️", distance_messages[1], [1])
         durations_sec, distances_m, error_msg = improved_graphhopper_duration_matrix(graphhopper_api_key, coords)
         calculation_method = "Maps"
@@ -3566,13 +3795,26 @@ if plan_button:
             st.error(f"❌ {error_msg}")
             st.stop()
         else:
-            # Debug: Vérifier que les durées sont bien reçues
             if debug_mode:
                 st.info(f"🔍 Debug Maps: {len(durations_sec)} x {len(durations_sec[0]) if durations_sec else 0} matrice de durées reçue")
                 if durations_sec and len(durations_sec) > 0:
-                    sample_duration = durations_sec[0][1] if len(durations_sec[0]) > 1 else 0
-                    st.info(f"🔍 Debug Maps: Exemple durée [0][1] = {sample_duration} secondes ({sample_duration/3600:.2f}h)")
-    
+                    sample = durations_sec[0][1] if len(durations_sec[0]) > 1 else 0
+                    st.info(f"🔍 Debug Maps: Exemple durée [0][1] = {sample} secondes ({sample/3600:.2f}h)")
+
+    elif distance_method == "OSRM uniquement (rapide)":
+        update_animation_step(2, "🗺️", distance_messages[1], [1])
+        durations_sec, distances_m, error_msg = improved_osrm_duration_matrix(osrm_base_url, coords)
+        calculation_method = "OSRM"
+        if durations_sec is None:
+            st.error(f"❌ {error_msg}")
+            st.stop()
+        else:
+            if debug_mode:
+                st.info(f"🔍 Debug OSRM: {len(durations_sec)} x {len(durations_sec[0]) if durations_sec else 0} matrice de durées reçue")
+                if durations_sec and len(durations_sec) > 0:
+                    sample = durations_sec[0][1] if len(durations_sec[0]) > 1 else 0
+                    st.info(f"🔍 Debug OSRM: Exemple durée [0][1] = {sample} secondes ({sample/3600:.2f}h)")
+
     elif distance_method == "Automatique uniquement":
         result, error_msg = improved_deepseek_estimate_matrix(city_list, deepseek_api_key, debug_mode)
         if result:
@@ -3582,59 +3824,78 @@ if plan_button:
         else:
             st.error(f"❌ {error_msg}")
             st.stop()
-    
+
     elif distance_method == "Géométrique uniquement":
         durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
         calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
         st.warning(f"📊 Méthode: {calculation_method}")
-    
+
     else:
-        # Mode Auto: comportement dynamique
-        # - Site unique → privilégier Maps en premier (plus précis)
-        # - Plusieurs sites → privilégier Automatique, puis Maps (si activé), puis Géométrique
+        # Mode Auto: dynamique
+        # - Site unique → OSRM → Automatique → Maps → Géométrique
+        # - Plusieurs sites → OSRM → Automatique → Maps → Géométrique
         single_site = len(sites) == 1
 
-        if single_site and graphhopper_api_key:
-            # Tentative prioritaire: Maps
+        if single_site:
             update_animation_step(2, "🗺️", distance_messages[1], [1])
-            durations_sec, distances_m, error_msg = improved_graphhopper_duration_matrix(graphhopper_api_key, coords)
+            # 1) OSRM en premier
+            durations_sec, distances_m, error_msg = improved_osrm_duration_matrix(osrm_base_url, coords)
             if durations_sec is not None:
-                calculation_method = "Maps"
+                calculation_method = "OSRM"
             else:
-                # Fallback: Automatique si disponible, sinon Géométrique
+                # 2) Automatique (DeepSeek)
                 if deepseek_api_key:
                     result, _ = improved_deepseek_estimate_matrix(city_list, deepseek_api_key, debug_mode)
                     if result:
                         durations_sec, distances_m = result
                         calculation_method = "Automatique"
                     else:
-                        durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
-                        calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
+                        # 3) Maps (GraphHopper), si option activée
+                        if use_deepseek_fallback and graphhopper_api_key:
+                            durations_sec, distances_m, error_msg = improved_graphhopper_duration_matrix(graphhopper_api_key, coords)
+                            if durations_sec is not None:
+                                calculation_method = "Maps"
+                            else:
+                                durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
+                                calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
+                        else:
+                            durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
+                            calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
                 else:
-                    durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
-                    calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
-        else:
-            # Comportement Auto standard pour plusieurs sites: Automatique → Maps (si coché) → Géométrique
-            result, error_msg = improved_deepseek_estimate_matrix(city_list, deepseek_api_key, debug_mode)
-            if result:
-                durations_sec, distances_m = result
-                calculation_method = "Automatique"
-            else:
-                if use_deepseek_fallback and graphhopper_api_key:
-                    # Tentative 2: Maps
-                    durations_sec, distances_m, error_msg = improved_graphhopper_duration_matrix(graphhopper_api_key, coords)
-                    if durations_sec is not None:
-                        calculation_method = "Maps"
+                    # Pas de clé DeepSeek, tenter Maps si autorisé puis géométrique
+                    if use_deepseek_fallback and graphhopper_api_key:
+                        durations_sec, distances_m, error_msg = improved_graphhopper_duration_matrix(graphhopper_api_key, coords)
+                        if durations_sec is not None:
+                            calculation_method = "Maps"
+                        else:
+                            durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
+                            calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
                     else:
-                        # Tentative 3: Géométrique
                         durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
                         calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
+        else:
+            # OSRM → Automatique → Maps (si activé) → Géométrique
+            durations_sec, distances_m, error_msg = improved_osrm_duration_matrix(osrm_base_url, coords)
+            if durations_sec is not None:
+                calculation_method = "OSRM"
+            else:
+                result, error_msg = improved_deepseek_estimate_matrix(city_list, deepseek_api_key, debug_mode)
+                if result:
+                    durations_sec, distances_m = result
+                    calculation_method = "Automatique"
                 else:
-                    # Sans fallback Maps, passer directement au géométrique
-                    durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
-                    calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
-        
-        method_color = "success" if "Maps" in calculation_method else "info" if "Automatique" in calculation_method else "warning"
+                    if use_deepseek_fallback and graphhopper_api_key:
+                        durations_sec, distances_m, error_msg = improved_graphhopper_duration_matrix(graphhopper_api_key, coords)
+                        if durations_sec is not None:
+                            calculation_method = "Maps"
+                        else:
+                            durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
+                            calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
+                    else:
+                        durations_sec, distances_m = haversine_fallback_matrix(coords, default_speed_kmh)
+                        calculation_method = f"Géométrique ({default_speed_kmh} km/h)"
+
+        method_color = "success" if ("Maps" in calculation_method or "OSRM" in calculation_method) else "info" if "Automatique" in calculation_method else "warning"
         getattr(st, method_color)(f"📊 Méthode: {calculation_method}")
     
     # Étape 3: Optimisation (commune à tous les modes)
@@ -3704,32 +3965,89 @@ if plan_button:
         if from_idx < len(durations_sec) and to_idx < len(durations_sec[0]):
             duration = durations_sec[from_idx][to_idx]
             distance = distances_m[from_idx][to_idx] if distances_m else 0
+            segment_method = "Matrix"
             
-            # Si la distance/durée est nulle, calculer avec la géométrie
+            # Si la distance/durée est nulle, recalculer via OSRM/Maps avec cache, puis fallback géométrique
             if duration == 0 or distance == 0:
-                from math import radians, sin, cos, sqrt, atan2
+                # Cache par segment
+                if 'segment_route_cache' not in st.session_state:
+                    st.session_state.segment_route_cache = {}
+                segment_cache = st.session_state.segment_route_cache
+                SEGMENT_CACHE_TTL = int(st.session_state.get('segment_cache_ttl_sec', 43200))
                 
-                # Calculer la distance géométrique
                 coord_from = coords[from_idx]
                 coord_to = coords[to_idx]
-                geometric_km = haversine(coord_from[0], coord_from[1], coord_to[0], coord_to[1])
-                geometric_km *= 1.2  # Facteur de correction pour les routes
+                key = (coord_from[0], coord_from[1], coord_to[0], coord_to[1])
+                now_ts = datetime.now().timestamp()
                 
-                # Si la distance était nulle, la calculer
-                if distance == 0:
-                    distance = int(geometric_km * 1000)
-                
-                # Si SEULEMENT la durée était nulle, la calculer en gardant la distance trouvée
-                if duration == 0:
-                    # Utiliser la distance réelle si elle existe, sinon la distance géométrique
-                    distance_for_time_calc = distance / 1000 if distance > 0 else geometric_km
-                    geometric_hours = distance_for_time_calc / default_speed_kmh
-                    duration = int(geometric_hours * 3600)
+                # 1) Cache
+                cached = segment_cache.get(key)
+                if cached and (now_ts - cached.get('ts', 0)) < SEGMENT_CACHE_TTL:
+                    distance = int(cached.get('distance', 0))
+                    duration = int(cached.get('duration', 0))
+                    segment_method = cached.get('method', 'Matrix')
+                else:
+                    # 2) OSRM route
+                    try:
+                        coord_str = f"{coord_from[0]},{coord_from[1]};{coord_to[0]},{coord_to[1]}"
+                        url = f"{osrm_base_url.rstrip('/')}/route/v1/driving/{coord_str}?overview=false"
+                        resp = requests.get(url, timeout=10)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            if data.get('routes'):
+                                r0 = data['routes'][0]
+                                d_m = int(r0.get('distance', 0))
+                                t_s = int(r0.get('duration', 0))
+                                if d_m > 0 and t_s > 0:
+                                    distance = d_m
+                                    duration = t_s
+                                    segment_method = "OSRM"
+                    except Exception:
+                        pass
+                    
+                    # 3) GraphHopper route
+                    if (duration == 0 or distance == 0) and graphhopper_api_key:
+                        try:
+                            gh_url = "https://graphhopper.com/api/1/route"
+                            qp = f"point={coord_from[1]},{coord_from[0]}&point={coord_to[1]},{coord_to[0]}&vehicle=car&locale=fr&points_encoded=false&calc_points=false&key={graphhopper_api_key}"
+                            gh_resp = requests.get(f"{gh_url}?{qp}", timeout=10)
+                            if gh_resp.status_code == 200:
+                                gh_data = gh_resp.json()
+                                paths = gh_data.get('paths')
+                                if paths:
+                                    p0 = paths[0]
+                                    d_m = int(p0.get('distance', 0))
+                                    t_ms = int(p0.get('time', 0))
+                                    t_s = int(t_ms / 1000)
+                                    if d_m > 0 and t_s > 0:
+                                        distance = d_m
+                                        duration = t_s
+                                        segment_method = "Maps"
+                        except Exception:
+                            pass
+                    
+                    # 4) Fallback géométrique
+                    if duration == 0 or distance == 0:
+                        geometric_km = haversine(coord_from[0], coord_from[1], coord_to[0], coord_to[1]) * 1.2
+                        if distance == 0:
+                            distance = int(geometric_km * 1000)
+                        if duration == 0:
+                            distance_for_time_calc = distance / 1000 if distance > 0 else geometric_km
+                            geometric_hours = distance_for_time_calc / default_speed_kmh
+                            duration = int(geometric_hours * 3600)
+                        segment_method = "Geo"
+                    
+                    # Mettre à jour le cache
+                    segment_cache[key] = {
+                        "distance": int(distance),
+                        "duration": int(duration),
+                        "method": segment_method,
+                        "ts": now_ts
+                    }
                 
                 zero_segments_indices.append(i)
-                
                 if debug_mode:
-                    st.info(f"🔍 Segment {i} recalculé géométriquement: {geometric_km:.1f}km, {duration/3600:.2f}h")
+                    st.info(f"🔍 Segment {i} recalculé via {segment_method}: {distance/1000:.1f}km, {duration/3600:.2f}h")
             
             # Debug: Afficher les valeurs des segments
             if debug_mode:
@@ -3737,7 +4055,8 @@ if plan_button:
             
             segments.append({
                 "distance": distance,
-                "duration": duration
+                "duration": duration,
+                "method": segment_method
             })
         else:
             segments.append({"distance": 0, "duration": 0})
@@ -3746,14 +4065,24 @@ if plan_button:
         st.error("❌ AUCUN segment créé!")
         st.stop()
     
-    # Afficher les segments recalculés géométriquement
+    # Résumé des méthodes de recalcul des segments
     if zero_segments_indices:
-        st.success(f"✅ {len(zero_segments_indices)} segment(s) recalculé(s) avec la distance géométrique")
+        method_summary = {"OSRM": 0, "Maps": 0, "Geo": 0}
+        for idx in zero_segments_indices:
+            m = segments[idx].get("method", "")
+            if m in method_summary:
+                method_summary[m] += 1
+        summary_str = " | ".join([
+            f"OSRM: {method_summary['OSRM']}",
+            f"Maps: {method_summary['Maps']}",
+            f"Géo: {method_summary['Geo']}"
+        ])
+        st.success(f"✅ {len(zero_segments_indices)} segment(s) recalculé(s) ({summary_str})")
     
-    # Vérifier s'il reste des segments à zéro après le recalcul géométrique
-    remaining_zero_segments = [i for i, s in enumerate(segments) if s['duration'] == 0]
+    # Vérifier s'il reste des segments à zéro après le recalcul
+    remaining_zero_segments = [i for i, s in enumerate(segments) if s['duration'] == 0 or s['distance'] == 0]
     if remaining_zero_segments:
-        st.warning(f"⚠️ {len(remaining_zero_segments)} segments avec durée estimée à 1h par défaut")
+        st.warning(f"⚠️ {len(remaining_zero_segments)} segment(s) avec valeurs manquantes après recalcul")
     
     status.text("📅 Génération du planning détaillé...")
     # Étape 5: Génération du planning
@@ -3900,7 +4229,8 @@ if st.session_state.planning_results:
     st.header("📊 Résumé de la mission")
     
     method_color = "success" if "Maps" in calculation_method else "info" if "Automatique" in calculation_method else "warning"
-    getattr(st, method_color)(f"📊 Distances calculées via: {calculation_method}")
+    # Message supprimé pour alléger l'UI
+# st.caption("📊 Distances calculées")
     
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -3930,6 +4260,12 @@ if st.session_state.planning_results:
             include_map_prof = st.checkbox("Inclure la carte", value=st.session_state.get("include_map_prof_html", False))
             st.session_state.include_map_prof_html = include_map_prof
 
+            include_prof_details = st.checkbox(
+                "Inclure section résumé",
+                value=st.session_state.get("include_prof_details", False)
+            )
+            st.session_state.include_prof_details = include_prof_details
+
             html_str = build_professional_html(
                 itinerary,
                 start_date,
@@ -3944,7 +4280,8 @@ if st.session_state.planning_results:
                 lunch_end_time=st.session_state.get("lunch_end_time"),
                 lunch_duration_min=st.session_state.get("lunch_duration_min", 60),
                 prayer_start_time=st.session_state.get("prayer_start_time"),
-                prayer_duration_min=st.session_state.get("prayer_duration_min", 20)
+                prayer_duration_min=st.session_state.get("prayer_duration_min", 20),
+                include_details=include_prof_details
             )
             st.components.v1.html(html_str, height=1100, scrolling=True)
             
@@ -4808,6 +5145,54 @@ if st.session_state.planning_results:
             distances_matrix = results['distances_matrix']
             all_coords = results['all_coords']
             
+            # Éditeur de table (optionnel)
+            with st.expander("🧮 Mode tableau (numéro d'ordre)", expanded=False):
+                import pandas as pd
+                rows = []
+                for i, site_idx in enumerate(st.session_state.get('manual_order', original_order)):
+                    if isinstance(site_idx, int) and 0 <= site_idx < len(sites_ordered):
+                        s = sites_ordered[site_idx]
+                        rows.append({
+                            "Index": site_idx,
+                            "Ville": s['Ville'],
+                            "Type": s.get('Type', 'Site'),
+                            "Activité": s.get('Activité', 'Activité'),
+                            "Ordre": i+1
+                        })
+                df_order = pd.DataFrame(rows)
+                edited_df = st.data_editor(
+                    df_order,
+                    column_config={
+                        "Ordre": st.column_config.NumberColumn("Ordre", min_value=1, max_value=len(rows), step=1),
+                        "Index": st.column_config.TextColumn("Index", disabled=True),
+                        "Ville": st.column_config.TextColumn("Ville", disabled=True),
+                        "Type": st.column_config.TextColumn("Type", disabled=True),
+                        "Activité": st.column_config.TextColumn("Activité", disabled=True),
+                    },
+                    column_order=["Ville", "Type", "Activité", "Ordre"],
+                    use_container_width=True,
+                    num_rows="fixed"
+                )
+                colA, colB = st.columns([2,1])
+                with colA:
+                    if st.button("✅ Appliquer l'ordre (table)", type="primary", use_container_width=True):
+                        try:
+                            ords = edited_df["Ordre"].tolist()
+                            if sorted(ords) != list(range(1, len(rows)+1)):
+                                st.error("Veuillez attribuer des numéros d'ordre uniques de 1 à N.")
+                            else:
+                                new_order = [int(row["Index"]) for _, row in edited_df.sort_values("Ordre").iterrows()]
+                                st.session_state.manual_order = new_order
+                                st.success("Ordre mis à jour depuis la table!")
+                                st.rerun()
+                        except Exception as e:
+                            st.error(f"Erreur lors de l'application: {str(e)[:120]}...")
+                with colB:
+                    if st.button("↩️ Restaurer", use_container_width=True):
+                        st.session_state.manual_order = original_order.copy()
+                        st.success("Ordre original restauré!")
+                        st.rerun()
+            
             # Créer une liste des sites avec leur ordre actuel
             if 'manual_order' not in st.session_state:
                 st.session_state.manual_order = original_order.copy()
@@ -4857,7 +5242,7 @@ if st.session_state.planning_results:
             st.markdown("---")
             
             # Boutons d'action
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             
             with col1:
                 if st.button("🔄 Recalculer l'itinéraire", use_container_width=True):
@@ -5009,6 +5394,26 @@ if st.session_state.planning_results:
                         st.session_state.manual_order = optimized_order
                         st.warning(f"Erreur IA Adja ({str(e)[:50]}...), optimisation TSP utilisée.")
                     st.rerun()
+
+            with col4:
+                if st.button("⚙️ Optimiser (OR-Tools)", use_container_width=True):
+                    try:
+                        # Construire les durées de service à partir des données des sites (Durée (h))
+                        service_times_sec = []
+                        for i in range(len(sites_ordered)):
+                            dur_h = sites_ordered[i].get("Durée (h)", 0)
+                            try:
+                                service_times_sec.append(int(float(dur_h or 0) * 3600))
+                            except Exception:
+                                service_times_sec.append(0)
+
+                        optimized_path = solve_tsp_ortools_fixed_start_end(durations_matrix, service_times_sec, time_limit_s=5)
+                        st.session_state.manual_order = optimized_path
+                        st.success("Ordre optimisé par OR-Tools (matrice OSRM/Maps).")
+                    except Exception as e:
+                        st.warning(f"OR-Tools indisponible ou erreur: {str(e)[:80]}... Fallback TSP.")
+                        st.session_state.manual_order = solve_tsp_fixed_start_end(durations_matrix)
+                    st.rerun()
     
     with tab_map:
         st.subheader("Carte de l'itinéraire")
@@ -5022,7 +5427,7 @@ if st.session_state.planning_results:
             # Tracé de l'itinéraire : tentative de récupération de la route réelle via OSRM, sinon fallback sur la ligne droite
             try:
                 coord_str = ";".join([f"{c[0]},{c[1]}" for c in coords_ordered])
-                url = f"https://router.project-osrm.org/route/v1/driving/{coord_str}?overview=full&geometries=geojson"
+                url = f"{osrm_base_url.rstrip('/')}/route/v1/driving/{coord_str}?overview=full&geometries=geojson"
                 resp = requests.get(url, timeout=10)
                 route_pts = None
                 if resp.status_code == 200:
@@ -5036,6 +5441,15 @@ if st.session_state.planning_results:
             except Exception:
                 route_pts = [[c[1], c[0]] for c in coords_ordered]
             folium.PolyLine(locations=route_pts, color="blue", weight=3, opacity=0.7).add_to(m)
+            
+            # Export Google Maps (ouvrir et copier)
+            try:
+                gmaps_pairs = [f"{c[1]},{c[0]}" for c in coords_ordered]
+                gmaps_url = "https://www.google.com/maps/dir/" + "/".join(gmaps_pairs) + "/?hl=fr"
+                st.markdown(f"[📍 Ouvrir dans Google Maps]({gmaps_url})")
+                st.text_input("Lien Google Maps", value=gmaps_url, help="Copiez ce lien pour partager ou ouvrir l'itinéraire dans Google Maps.", label_visibility="collapsed")
+            except Exception:
+                st.info("Lien Google Maps non disponible")
             
             # Préparer affichage spécial si départ et arrivée sont au même endroit
             n_steps = len(sites_ordered)
@@ -5224,7 +5638,8 @@ if st.session_state.planning_results:
                 lunch_end_time=st.session_state.get("lunch_end_time"),
                 lunch_duration_min=st.session_state.get("lunch_duration_min", 60),
                 prayer_start_time=st.session_state.get("prayer_start_time"),
-                prayer_duration_min=st.session_state.get("prayer_duration_min", 20)
+                prayer_duration_min=st.session_state.get("prayer_duration_min", 20),
+                include_details=st.session_state.get("include_prof_details", True)
             )
             st.download_button(
                 label="📥 Télécharger HTML",
