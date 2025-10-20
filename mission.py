@@ -2951,9 +2951,19 @@ with tab1:
         col1, col2, col3 = st.columns([2, 1, 2])
         with col1:
             if st.button("🗑️ Supprimer lignes cochées", use_container_width=True):
-                remaining_df = sites_df[~sites_df['Supprimer']].copy()
-                if 'Supprimer' in remaining_df.columns:
-                    remaining_df = remaining_df.drop(columns=['Supprimer'])
+                # Sécurité: gérer le cas où la colonne 'Supprimer' serait absente ou non booléenne
+                if 'Supprimer' in sites_df.columns:
+                    suppr_series = sites_df['Supprimer'].fillna(False)
+                    try:
+                        suppr_mask = ~suppr_series.astype(bool)
+                    except Exception:
+                        # Si conversion échoue, ne supprimer aucune ligne
+                        suppr_mask = [True] * len(sites_df)
+                    remaining_df = sites_df[suppr_mask].copy()
+                    if 'Supprimer' in remaining_df.columns:
+                        remaining_df = remaining_df.drop(columns=['Supprimer'])
+                else:
+                    remaining_df = sites_df.copy()
                 st.session_state.sites_df = remaining_df.reset_index(drop=True)
                 st.success("Lignes sélectionnées supprimées")
                 st.rerun()
@@ -3816,6 +3826,16 @@ if plan_button:
     }
     st.session_state.manual_itinerary = None
     st.session_state.edit_mode = False
+
+    # Nettoyer l'animation et la barre de progression pour éviter le spinner persistant
+    try:
+        progress.empty()
+    except Exception:
+        pass
+    try:
+        animation_container.empty()
+    except Exception:
+        pass
 
 # --------------------------
 # AFFICHAGE RÉSULTATS
