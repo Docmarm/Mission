@@ -3425,7 +3425,7 @@ with tab3:
         if use_prayer:
             st.markdown("**Fenêtre de prière**")
             prayer_start_time = st.time_input("Début fenêtre", value=st.session_state.get("prayer_start_time", time(13, 0)), key="prayer_start")
-            prayer_duration_min = st.number_input("Durée pause (min)", min_value=5, max_value=60, value=st.session_state.get("prayer_duration_min", 20), key="prayer_duration")
+            prayer_duration_min = st.number_input("Durée pause (min)", min_value=5, max_value=60, value=st.session_state.get("prayer_duration_min", 20) or 20, key="prayer_duration")
 
     st.divider()
     st.subheader("📦 Import/Export JSON")
@@ -3450,7 +3450,7 @@ with tab3:
                 "lunch_duration_min": (int(lunch_duration_min) if use_lunch else None),
                 "use_prayer": bool(use_prayer),
                 "prayer_start_time": (prayer_start_time.strftime("%H:%M") if use_prayer and prayer_start_time else None),
-                "prayer_duration_min": (int(prayer_duration_min) if use_prayer else None),
+                "prayer_duration_min": (int(prayer_duration_min) if use_prayer and prayer_duration_min is not None else None),
                 "distance_method": distance_method,
             }
             json_str = json.dumps(mission_config, ensure_ascii=False, indent=2)
@@ -3506,7 +3506,11 @@ with tab3:
                     st.session_state.lunch_duration_min = imported.get("lunch_duration_min", st.session_state.get("lunch_duration_min", 60))
                     st.session_state.use_prayer = imported.get("use_prayer", use_prayer)
                     st.session_state.prayer_start_time = parse_time(imported.get("prayer_start_time"), prayer_start_time)
-                    st.session_state.prayer_duration_min = imported.get("prayer_duration_min", prayer_duration_min)
+                    val_prayer_dur = imported.get("prayer_duration_min", None)
+                    try:
+                        st.session_state.prayer_duration_min = int(val_prayer_dur) if val_prayer_dur is not None else st.session_state.get("prayer_duration_min", 20)
+                    except Exception:
+                        st.session_state.prayer_duration_min = st.session_state.get("prayer_duration_min", 20)
 
                     st.success("✅ Configuration importée. Les paramètres et sites ont été mis à jour.")
                 except Exception as e:
