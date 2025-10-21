@@ -2187,7 +2187,14 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                             # Placer le déjeuner immédiatement à l'arrivée
                             lunch_time = max(travel_end, lunch_window_start)
                             lunch_end_time_actual = min(lunch_time + timedelta(minutes=lunch_duration_min), lunch_window_end)
-                            itinerary.append((day_count, lunch_time, lunch_end_time_actual, f"🍽️ Déjeuner (≤{lunch_duration_min} min)"))
+                            desc_text = f"🍽️ Déjeuner (≤{lunch_duration_min} min)"
+                            if use_prayer and prayer_start_time and not daily_prayer_added.get(day_count, False):
+                                prayer_window_start = datetime.combine(lunch_time.date(), prayer_start_time)
+                                prayer_window_end = prayer_window_start + timedelta(hours=2)
+                                if lunch_time < prayer_window_end and lunch_end_time_actual > prayer_window_start:
+                                    desc_text = f"🍽️ Déjeuner (≤{lunch_duration_min} min) + 🙏 Prière (≤{prayer_duration_min} min)"
+                                    daily_prayer_added[day_count] = True
+                            itinerary.append((day_count, lunch_time, lunch_end_time_actual, desc_text))
                             daily_lunch_added[day_count] = True
                             
                             # Mettre à jour l'heure courante à la fin du déjeuner
@@ -2378,9 +2385,17 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                 if use_lunch and lunch_window_start and lunch_window_end and not daily_lunch_added.get(day_count, False):
                     if current_datetime < lunch_window_end and visit_end > lunch_window_start:
                         place_lunch_after_visit = True
+                # If lunch will be placed after the visit, and prayer window overlaps that lunch window,
+                # combine prayer with lunch instead of splitting the visit
+                combine_prayer_with_lunch = False
+                if place_lunch_after_visit and use_prayer and prayer_window_start and prayer_window_end and not daily_prayer_added.get(day_count, False):
+                    planned_lunch_start = max(visit_end, lunch_window_start)
+                    planned_lunch_end = min(planned_lunch_start + timedelta(minutes=lunch_duration_min), lunch_window_end)
+                    if planned_lunch_start < prayer_window_end and planned_lunch_end > prayer_window_start:
+                        combine_prayer_with_lunch = True
                 
-                # Check for prayer break during visit (only if no lunch is planned after visit)
-                if use_prayer and prayer_window_start and prayer_window_end and not daily_prayer_added.get(day_count, False) and not place_lunch_after_visit and not daily_lunch_added.get(day_count, False):
+                # Check for prayer break during visit (skip if it will be combined with lunch after visit)
+                if use_prayer and prayer_window_start and prayer_window_end and not daily_prayer_added.get(day_count, False) and not combine_prayer_with_lunch:
                     if current_datetime < prayer_window_end and visit_end > prayer_window_start:
                         prayer_time = max(current_datetime, prayer_window_start)
                         prayer_end_time = min(prayer_time + timedelta(minutes=prayer_duration_min), prayer_window_end)
@@ -2409,7 +2424,11 @@ def schedule_itinerary(coords, sites, order, segments_summary,
                 lunch_time = max(current_datetime, lunch_window_start)
                 if lunch_time < lunch_window_end:
                     lunch_end_time_actual = min(lunch_time + timedelta(minutes=lunch_duration_min), lunch_window_end)
-                    itinerary.append((day_count, lunch_time, lunch_end_time_actual, f"🍽️ Déjeuner (≤{lunch_duration_min} min)"))
+                    desc_text = f"🍽️ Déjeuner (≤{lunch_duration_min} min)"
+                    if 'combine_prayer_with_lunch' in locals() and combine_prayer_with_lunch and use_prayer and not daily_prayer_added.get(day_count, False):
+                        desc_text = f"🍽️ Déjeuner (≤{lunch_duration_min} min) + 🙏 Prière (≤{prayer_duration_min} min)"
+                        daily_prayer_added[day_count] = True
+                    itinerary.append((day_count, lunch_time, lunch_end_time_actual, desc_text))
                     daily_lunch_added[day_count] = True
                     current_datetime = lunch_end_time_actual
             
